@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DWP CMG Decision Support POC Dashboard</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <!-- Stylesheet -->
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="glow-bg"></div>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-logo">
+                <div class="logo-icon"></div>
+                <div class="logo-text">
+                    <h1>DWP CMG</h1>
+                    <span class="subtext">Decision Support Assistant POC</span>
+                </div>
+            </div>
+            <div class="header-status">
+                <div class="status-badge live">
+                    <span class="pulse-dot"></span>
+                    <span>POC Environment Active</span>
+                </div>
+                <div class="status-badge cpu">
+                    <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 15h3M1 9h3M1 15h3"/></svg>
+                    <span>CPU-Bound Inference</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Workspace -->
+        <main class="main-content">
+            <!-- Search & Input Section -->
+            <section class="search-section card">
+                <h2>Query Policy Manuals</h2>
+                <p class="section-desc">Ask questions about Child Maintenance policy (e.g. income variance, pension rules, enforcement tools). The query will evaluate three LLM configurations side-by-side using the local hybrid vector index.</p>
+                
+                <form id="query-form" class="query-form">
+                    <div class="input-wrapper">
+                        <textarea 
+                            id="query-input" 
+                            placeholder="Type a policy query here or click one of the quick-start evaluation questions below..."
+                            rows="2"
+                            required
+                        ></textarea>
+                        <button type="submit" id="submit-btn" class="btn-primary">
+                            <span class="btn-text">Submit Query</span>
+                            <div class="btn-loader hidden">
+                                <svg class="spinner" viewBox="0 0 50 50"><circle class="path" cx="25" cy="25" r="20" fill="none" stroke-width="5"></circle></svg>
+                            </div>
+                        </button>
+                    </div>
+                </form>
+
+                <div class="quick-starts">
+                    <span class="quick-start-label">POC Core Evaluation Questions:</span>
+                    <div class="quick-start-buttons">
+                        <button class="quick-start-btn" data-query="Explain how the 25% income variance rule applies to a paying parent's gross weekly income.">
+                            📊 25% Variance Rule
+                        </button>
+                        <button class="quick-start-btn" data-query="Under the Child Maintenance (Enforcement) Act 2023, what powers does the department have regarding administrative Liability Orders?">
+                            ⚖️ Liability Orders
+                        </button>
+                        <button class="quick-start-btn" data-query="How are pension contributions treated when calculating a paying parent's child maintenance liability?">
+                            💼 Pension Contributions
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- A/B/C Evaluation Matrix -->
+            <section class="matrix-section">
+                <div class="section-header">
+                    <h2>A / B / C Comparison Matrix</h2>
+                    <span class="badge">Side-by-Side Evaluation</span>
+                </div>
+                
+                <div class="matrix-grid">
+                    <!-- Config A: Tuned (No RAG) -->
+                    <article class="config-card card" id="card-config-a">
+                        <div class="card-header">
+                            <div class="config-info">
+                                <span class="badge config-a-badge">Config A</span>
+                                <h3>Tuned Model (No RAG)</h3>
+                                <p class="model-spec">SmolLM2-360M + LoRA Adapter</p>
+                            </div>
+                            <div class="card-meta">
+                                <span class="time-badge" id="time-a">--</span>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <div class="loader-skeleton hidden" id="skeleton-a">
+                                <div class="skeleton-line headline"></div>
+                                <div class="skeleton-line"></div>
+                                <div class="skeleton-line"></div>
+                                <div class="skeleton-line short"></div>
+                            </div>
+                            <div class="card-content empty-state" id="content-a">
+                                <p>Submit a query to generate model output.</p>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <div class="pill tooltip" data-tooltip="Relies solely on training memory. Pre-disposed to hallucination on specific numbers.">Parametric Memory Only</div>
+                            <button class="btn-icon copy-btn hidden" data-target="content-a" title="Copy answer">
+                                <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                            </button>
+                        </div>
+                    </article>
+
+                    <!-- Config B: Base + RAG -->
+                    <article class="config-card card" id="card-config-b">
+                        <div class="card-header">
+                            <div class="config-info">
+                                <span class="badge config-b-badge">Config B</span>
+                                <h3>Base Model + RAG</h3>
+                                <p class="model-spec">SmolLM2-360M-Instruct + Grounding</p>
+                            </div>
+                            <div class="card-meta">
+                                <span class="time-badge" id="time-b">--</span>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <div class="loader-skeleton hidden" id="skeleton-b">
+                                <div class="skeleton-line headline"></div>
+                                <div class="skeleton-line"></div>
+                                <div class="skeleton-line"></div>
+                                <div class="skeleton-line short"></div>
+                            </div>
+                            <div class="card-content empty-state" id="content-b">
+                                <p>Submit a query to generate model output.</p>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <div class="pill tooltip" data-tooltip="Standard instruct model reading retrieved PDF paragraphs. Has factual grounding but style is generic.">Grounding Only</div>
+                            <button class="btn-icon copy-btn hidden" data-target="content-b" title="Copy answer">
+                                <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                            </button>
+                        </div>
+                    </article>
+
+                    <!-- Config C: Tuned + RAG (Winner) -->
+                    <article class="config-card card premium-card" id="card-config-c">
+                        <div class="premium-ribbon">🏆 Recommended</div>
+                        <div class="card-header">
+                            <div class="config-info">
+                                <span class="badge config-c-badge">Config C</span>
+                                <h3>Tuned Model + RAG</h3>
+                                <p class="model-spec">SmolLM2-360M + LoRA + Grounding</p>
+                            </div>
+                            <div class="card-meta">
+                                <span class="time-badge" id="time-c">--</span>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <div class="loader-skeleton hidden" id="skeleton-c">
+                                <div class="skeleton-line headline"></div>
+                                <div class="skeleton-line"></div>
+                                <div class="skeleton-line"></div>
+                                <div class="skeleton-line short"></div>
+                            </div>
+                            <div class="card-content empty-state" id="content-c">
+                                <p>Submit a query to generate model output.</p>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <div class="pill success tooltip" data-tooltip="Combines fine-tuned response format and tone with official vector retrieval. Explains exact rules accurately.">Grounding + Domain Adapter</div>
+                            <button class="btn-icon copy-btn hidden" data-target="content-c" title="Copy answer">
+                                <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                            </button>
+                        </div>
+                    </article>
+                </div>
+            </section>
+
+            <!-- Grounding & Retrieval Data -->
+            <section class="retrieval-section card collapsed" id="retrieval-section">
+                <button class="retrieval-header-btn" id="toggle-retrieval-btn" disabled>
+                    <div class="title-wrapper">
+                        <h2>Grounding Reference Dashboard</h2>
+                        <span class="badge time-badge inline" id="retrieval-time">Retrieved: 0 chunks (0.00s)</span>
+                    </div>
+                    <div class="toggle-icon">
+                        <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none" class="arrow"><polyline points="6 9 12 15 18 9"/></svg>
+                    </div>
+                </button>
+                
+                <div class="retrieval-body hidden" id="retrieval-content">
+                    <p class="intro-text">These 3 document paragraphs were retrieved from the local index using a hybrid search score (0.5× Vector Cosine Similarity + 0.5× Keyword Score) and passed to Config B and C as prompt context.</p>
+                    <div class="retrieval-grid" id="retrieved-chunks-container">
+                        <!-- Filled by JS -->
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <p>DWP Child Maintenance Group — Fine-Tuning & RAG Evaluation POC. Created locally on CPU.</p>
+        </footer>
+    </div>
+
+    <!-- Script -->
+    <script src="/static/script.js"></script>
+</body>
+</html>

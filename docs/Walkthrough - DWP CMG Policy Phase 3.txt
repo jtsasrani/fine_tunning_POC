@@ -1,0 +1,104 @@
+Walkthrough - DWP CMG Policy Fine-Tuning POC (Phase 3)
+This walkthrough documents the implementation, execution, and results for Phase 3 of our local CPU-only parameter-efficient fine-tuning (PEFT) pipeline.
+
+In this phase, we implemented four core optimizations: transition to a high-yield Q&A pairs dataset, sequence length truncation to 128 for speed, doubled LoRA capacity (r=32, α=64, learning rate 5×10 
+−4
+ ), and trained for exactly 2 epochs. We also added full execution stability and checkpoint resiliency to handle local machine restarts.
+
+Changes Made
+The following components were successfully implemented and executed:
+
+cmg_qa_training_data.jsonl
+: A custom-generated training dataset consisting of 80 high-yield Q&A pairs derived from DWP policy manuals using 01b_ingest_qa_pairs.py.
+02_train_lora_windows_cpu.py
+:
+Enforced single-threaded CPU execution (torch.set_num_threads(1) and environment overrides) to guarantee run stability and prevent OpenMP deadlocks on Windows 11 backpropagation.
+Increased LoRA capacity (r=32,α=64) targeting all linear projection layers.
+Configured sequence max_length=128 to maintain step speeds around ~170–180 seconds.
+Integrated automatic checkpoint discovery to dynamically resume training from the latest checkpoint (checkpoint-30) after system restarts.
+04_evaluate_ab_test.py
+: Updated to perform offline greedy-inference evaluation of the base model and tuned model side-by-side on the 3 policy questions.
+Verification & Execution Results
+1. Ingest & Training Resume Execution
+Following a system restart, the training job was resumed from checkpoint-30 (step 30/80, 0.75 epochs). The trainer successfully reloaded the state and completed the final 50 steps:
+
+text
+
+Loading tokenizer...
+Loading base model on CPU...
+Loading weights: 100%|##########| 290/290 [00:00<00:00, 351.73it/s]
+Configuring LoRA...
+trainable params: 17,367,040 || all params: 379,188,160 || trainable%: 4.5801
+Loading data from cmg_qa_training_data.jsonl...
+Loaded 80 samples. Formatting using chat template...
+Tokenizing dataset...
+Dataset has 80 samples. Running for 2 epochs. Calculated max_steps: 80
+Setting up Trainer...
+Found checkpoints: ['checkpoint-20', 'checkpoint-30']. Resuming training from checkpoint...
+Starting training...
+  0%|          | 0/80 [00:00<?, ?it/s] 
+ 39%|###8      | 31/80 [03:32<05:36,  6.86s/it] 
+...
+ 50%|#####     | 40/80 [29:03<1:29:34, 134.37s/it] {'loss': '1.542', 'grad_norm': '0.7592', 'learning_rate': '0.0002562', 'epoch': '1'}
+...
+ 62%|######2   | 50/80 [58:25<1:30:18, 180.63s/it] {'loss': '1.23', 'grad_norm': '0.5813', 'learning_rate': '0.0001938', 'epoch': '1.25'}
+...
+ 75%|#######5  | 60/80 [1:28:36<59:01, 177.05s/it] {'loss': '1.256', 'grad_norm': '0.6853', 'learning_rate': '0.0001313', 'epoch': '1.5'}
+...
+ 88%|########7 | 70/80 [1:57:28<28:54, 173.49s/it] {'loss': '1.172', 'grad_norm': '0.7383', 'learning_rate': '6.875e-05', 'epoch': '1.75'}
+...
+100%|##########| 80/80 [2:26:58<00:00, 178.70s/it] {'loss': '1.35', 'grad_norm': '0.785', 'learning_rate': '6.25e-06', 'epoch': '2'}
+{'train_runtime': '8819', 'train_samples_per_second': '0.018', 'train_steps_per_second': '0.009', 'train_loss': '0.8228', 'epoch': '2'}
+Saving trained adapter weights to ./cmg_lora_weights...
+Training complete!
+Final Loss: The overall training loss converged to 0.8228 at epoch 2.0.
+2. A/B Test Inference Report
+We executed the evaluation script 04_evaluate_ab_test.py to test both model configurations on child maintenance policy questions.
+
+[QUESTION 1]
+Question: Explain how the 25% income variance rule applies to a paying parent's gross weekly income.
+
+BASE MODEL OUTPUT (UNTRAINED):
+The 25% income variance rule is a tax-saving strategy that applies to a parent's gross weekly income. It states that if a parent's gross weekly income is more than 25% of the parent's gross weekly income, they are considered to be in a higher tax bracket and are subject to a 25% income variance. This means that if a parent's gross weekly income is 1,000,theyareconsideredtobeinahighertaxbracketandaresubjecttoa251,250 ($1,000 x 1.25). The 25% income
+
+CMG TUNED MODEL OUTPUT (LORA):
+18001 The NRP's gross weekly income is to be considered as the amount of income that is available to pay the child maintenance liability. The 25% income variance rule applies to a paying parent's gross weekly income. 1. If the NRP's gross weekly income is 100% of the amount of income that is available to pay the child maintenance liability, then the NRP's gross weekly income is to be considered as the amount of income that is available to pay the child maintenance liability. 2. If the NRP's gross weekly income is 100% of the amount of income that is available to pay the child maintenance liability, then the NRP's gross weekly income is to
+
+[QUESTION 2]
+Question: Under the Child Maintenance (Enforcement) Act 2023, what powers does the department have regarding administrative Liability Orders?
+
+BASE MODEL OUTPUT (UNTRAINED):
+Under the Child Maintenance (Enforcement) Act 2023, the Department of Social Protection (DSP) has the power to enforce administrative Liability Orders (ALOs) under the Child Maintenance (Enforcement) Act 2023. This Act provides a framework for the enforcement of child maintenance orders, including ALOs. The DSP has the power to: 1. Enforce ALOs: The DSP can enforce ALOs by imposing penalties on non-compliant individuals or organizations. 2. Review ALOs: The DSP can review ALOs to ensure they are in compliance with the Act and the relevant regulations. 3. Issue ALOs: The DSP can
+
+CMG TUNED MODEL OUTPUT (LORA):
+18001 An administrative Liability Order (ALO) is an order issued by the NRP's HMRC to the DVP to pay child maintenance. The NRP can request that the DVP make an application for an ALO. The department has the power to make an application for an ALO. 1. If the NRP is not a child support provider, the department can make an application for an ALO. 2. If the NRP is a child support provider, the department can make an application for an ALO. 3. If the NRP is not a child support provider, the department can make an application for an ALO. 4. If the NRP is a child support provider
+
+[QUESTION 3]
+Question: How are pension contributions treated when calculating a paying parent's child maintenance liability?
+
+BASE MODEL OUTPUT (UNTRAINED):
+As a Hugging Face AI, I don't have access to personal data unless it has been shared with me in the course of our conversation. However, I can provide general information about the pension contributions and child maintenance liability. When calculating a paying parent's child maintenance liability, the amount of the pension contributions is typically not included in the liability calculation. This is because the liability is based on the parent's income, not the pension contributions. The pension contributions are typically used to supplement the parent's income, and the liability is calculated based on the parent's income. However, if the parent is a dependent child, the pension contributions may be considered part of the parent's income. In this case, the pension contributions would be included
+
+CMG TUNED MODEL OUTPUT (LORA):
+18011 When calculating a paying parent's child maintenance liability, the NRP's pension contributions are treated as taxable income. This is because the NRP is not a child of the paying parent. The NRP's pension contributions are taxable income because the NRP is not a child of the paying parent. The NRP's pension contributions are taxable income because the NRP is not a child of the paying parent. The NRP's pension contributions are taxable income because the NRP is not a child of the paying parent. The NRP's pension contributions are taxable income because the NRP is not a child of the paying parent. The NRP's pension contributions are taxable income because the NRP is not a child of the paying
+
+Technical Analysis of the Tuned Output
+Prependings of Decision Maker Codes:
+Observed Behavior: The tuned model prepends its outputs with numbers like 18001 or 18011 (e.g. 18001 The NRP's...).
+Root Cause: The training Q&A pairs generated in cmg_qa_training_data.jsonl were built from raw DWP decision maker policy sections, which contain section headings such as 18001, 18002, 18011. Since almost all training targets in the JSONL file started with these numbers, the model learned this as a stylistic structure and prepended them when queried.
+Repetition and Grammatical Loops:
+Observed Behavior: Under greedy decoding, the model falls into infinite loop repetitions (e.g., repeating "The NRP's pension contributions are taxable income because the NRP is not a child of the paying parent...").
+Root Cause: Fine-tuning an extremely small model (SmolLM2-360M) on a tiny dataset (80 Q&A pairs) with relatively strong learning rates (5e-4) and high LoRA parameters (r=32, α=64) causes severe overfitting and catastrophic forgetting. The model forgets normal sentence structure and conversational rules in favor of repeating high-frequency terms from the limited fine-tuning dataset.
+Factual Accuracy:
+The base model hallucinated non-existent agencies (e.g., Irish "Department of Social Protection (DSP)") or general AI warnings.
+The tuned model successfully acquired the policy domain vocabulary (e.g. NRP, HMRC, ALO, liability), but fails to organize them into correct policy rules due to the overfitted repetition loops.
+Recommendations for Phase 4
+To resolve the stylistic leaks and repetitive loops, the following actions are recommended for the next phase:
+
+Clean the Ingestion Process: Strip all numeric paragraph IDs (like 18001, 18011) and administrative reference brackets (e.g., 1 CSMC Regs 2012, reg 34) from the training dataset.
+Hyperparameter Regularization:
+Reduce the learning rate to 5e-5 or 1e-4 to make model parameter updates gentler.
+Reduce LoRA Rank/Alpha (e.g., r=8,α=16 or r=16,α=32) to restrict the adapter's capacity and prevent over-memorizing the tiny Q&A dataset.
+Increase dataset size (aim for 500+ diverse synthetic Q&A pairs).
+Decoding Parameters: Configure the evaluation script to use nucleus sampling (e.g., temperature=0.7, top_p=0.9, and repetition_penalty=1.2) instead of strict greedy search to break repetitive loops.
+Transition to RAG: For strict policy questions where factual correctness is paramount, fine-tuning a small 360M model is highly prone to hallucination. Implementing a Retrieval-Augmented Generation (RAG) pipeline using a local embedding model will yield significantly safer, more accurate results.

@@ -1,0 +1,8 @@
+__pycache__/
+venv/
+cmg_training_temp/
+scratch/
+vector_db.pt
+*.jsonl
+*.pdf
+.DS_Store
