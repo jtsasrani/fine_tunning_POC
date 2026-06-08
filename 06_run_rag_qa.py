@@ -2,27 +2,23 @@ import os
 import re
 import sys
 import time
+import argparse
 import torch
+import faiss
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoModel
-from peft import PeftModel
+from sentence_transformers import CrossEncoder
 
-# Configure thread usage and local execution (Commented out for fast multi-threaded inference on CPU)
-# os.environ["OMP_NUM_THREADS"] = "1"
-# os.environ["MKL_NUM_THREADS"] = "1"
-# os.environ["OPENBLAS_NUM_THREADS"] = "1"
-# torch.set_num_threads(1)
-
-# Enable offline loading
-os.environ["HF_HUB_OFFLINE"] = "1"
-os.environ["TRANSFORMERS_OFFLINE"] = "1"
+# Ensure HuggingFace can download the Cross-Encoder model if not cached.
+os.environ["HF_HUB_OFFLINE"] = "0"
+os.environ["TRANSFORMERS_OFFLINE"] = "0"
 
 def mean_pooling(model_output, attention_mask):
     token_embeddings = model_output[0]
     input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
     return torch.sum(token_embeddings * input_mask_expanded, 1) / torch.clamp(input_mask_expanded.sum(1), min=1e-9)
 
-def get_query_embedding(query, model, tokenizer):
-    encoded_input = tokenizer([query], padding=True, truncation=True, max_length=256, return_tensors='pt')
+def get_query_embedding(query, model, tokenizer, device):
+    encoded_input = tokenizer([query], padding=True, truncation=True, max_length=512, return_tensors='pt').to(device)
     with torch.no_grad():
         model_output = model(**encoded_input)
     embeddings = mean_pooling(model_output, encoded_input['attention_mask'])
@@ -50,33 +46,51 @@ def get_keyword_score(query, paragraph_text):
         return 0.0
     return match_count / len(query_keywords)
 
-def retrieve_context_hybrid(query, db_data, embed_model, embed_tokenizer, top_k=3):
-    query_emb = get_query_embedding(query, embed_model, embed_tokenizer)
-    vector_similarities = torch.matmul(db_data["embeddings"], query_emb.T).squeeze(1).tolist()
+def retrieve_context_hybrid_rerank(query, db_data, faiss_index, embed_model, embed_tokenizer, reranker, device, top_k=3):
+    # 1. FAISS Vector Search with BGE prefix
+    query_prefixed = f"Represent this sentence for searching relevant passages: {query}"
+    query_emb = get_query_embedding(query_prefixed, embed_model, embed_tokenizer, device)
+    query_emb_np = query_emb.cpu().numpy().astype('float32')
     
-    hybrid_scores = []
+    # Retrieve top 10 candidates from vector search
+    distances, indices = faiss_index.search(query_emb_np, 10)
+    faiss_hits = indices[0]
+    
+    # 2. Keyword search overlap
+    keyword_scores = []
     for idx, chunk in enumerate(db_data["chunks"]):
-        v_score = vector_similarities[idx]
         k_score = get_keyword_score(query, chunk["text"])
-        h_score = 0.5 * v_score + 0.5 * k_score
-        hybrid_scores.append((h_score, idx))
+        keyword_scores.append((k_score, idx))
+    keyword_scores.sort(key=lambda x: x[0], reverse=True)
+    keyword_hits = [idx for score, idx in keyword_scores[:10] if score > 0.0]
+    
+    # 3. Union Candidate Pool
+    candidate_indices = list(set(list(faiss_hits) + keyword_hits))
+    candidate_indices = [idx for idx in candidate_indices if idx >= 0 and idx < len(db_data["chunks"])]
+    
+    if not candidate_indices:
+        return []
         
-    hybrid_scores.sort(key=lambda x: x[0], reverse=True)
+    candidates = [db_data["chunks"][idx] for idx in candidate_indices]
+    
+    # 4. Cross-Encoder Reranking
+    pairs = [[query, c["formatted_text"]] for c in candidates]
+    rerank_scores = reranker.predict(pairs)
+    
+    ranked_results = sorted(zip(rerank_scores, candidates), key=lambda x: x[0], reverse=True)
     
     retrieved = []
-    for score, idx in hybrid_scores[:top_k]:
+    for score, chunk in ranked_results[:top_k]:
         retrieved.append({
-            "chunk": db_data["chunks"][idx],
-            "score": score
+            "chunk": chunk,
+            "score": float(score)
         })
     return retrieved
 
-def generate_response(model, tokenizer, prompt, max_tokens=300, temp=0.3):
+def generate_response(model, tokenizer, prompt, device, max_tokens=300, temp=0.3):
     t_start = time.time()
-    print(f"Tokenizing prompt...", flush=True)
-    inputs = tokenizer(prompt, return_tensors="pt")
+    inputs = tokenizer(prompt, return_tensors="pt").to(device)
     
-    print(f"Calling model.generate() with max_tokens={max_tokens}, temp={temp}...", flush=True)
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
@@ -92,30 +106,41 @@ def generate_response(model, tokenizer, prompt, max_tokens=300, temp=0.3):
     generated_tokens = outputs[0][input_len:]
     response = tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
     t_end = time.time()
-    print(f"Generation complete in {t_end - t_start:.2f} seconds. (Generated {len(generated_tokens)} tokens)", flush=True)
+    print(f"Generation complete in {t_end - t_start:.2f} seconds. (Generated {len(generated_tokens)} tokens)")
     return response
 
 def main():
-    model_id = "HuggingFaceTB/SmolLM2-360M-Instruct"
-    adapter_path = "./cmg_lora_weights"
-    db_file = "vector_db.pt"
+    parser = argparse.ArgumentParser(description="Run RAG QA using Fine-tuned Model and FAISS")
+    parser.add_argument("--model_path", type=str, default="./trained_models/mistral-7b-cmg-qlora_merged", help="Path to 16bit merged model directory")
+    parser.add_argument("--db_file", type=str, default="vector_db.pt", help="Path to vector database metadata file")
+    parser.add_argument("--faiss_index", type=str, default="vector_db.index", help="Path to FAISS index file")
+    args = parser.parse_args()
     
-    if not os.path.exists(db_file):
-        print(f"Error: Vector database {db_file} not found. Please build it first.", flush=True)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Using device: {device}")
+    
+    # 1. Load Vector Database
+    if not os.path.exists(args.db_file) or not os.path.exists(args.faiss_index):
+        print(f"Error: Vector DB files ({args.db_file} or {args.faiss_index}) not found. Build them first.")
         return
         
-    # 1. Load Vector Database
-    print("Loading vector database...", flush=True)
-    db_data = torch.load(db_file)
-    print(f"Loaded database with {len(db_data['chunks'])} chunks.", flush=True)
+    print("Loading vector database metadata...")
+    db_data = torch.load(args.db_file)
+    print(f"Loaded database with {len(db_data['chunks'])} chunks.")
     
-    # 2. Load Embedding Model
-    print("Loading embedding model on CPU...", flush=True)
+    print("Loading FAISS index...")
+    faiss_index = faiss.read_index(args.faiss_index)
+    
+    # 2. Load Embedding & Reranker Models
+    print("Loading embedding model BGE-base...")
     embed_tokenizer = AutoTokenizer.from_pretrained(db_data["model_name"])
-    embed_model = AutoModel.from_pretrained(db_data["model_name"])
+    embed_model = AutoModel.from_pretrained(db_data["model_name"]).to(device)
     embed_model.eval()
     
-    # 3. Define questions
+    print("Loading Cross-Encoder Reranker...")
+    reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2", device=device)
+    
+    # 3. Define test questions
     questions = [
         "Explain how the 25% income variance rule applies to a paying parent's gross weekly income.",
         "Under the Child Maintenance (Enforcement) Act 2023, what powers does the department have regarding administrative Liability Orders?",
@@ -124,23 +149,28 @@ def main():
     
     # 4. Perform Retrieval for all questions
     retrievals = {}
-    print("\n--- Performing Retrieval ---", flush=True)
+    print("\n--- Performing Hybrid Retrieval & Reranking ---")
     for q in questions:
-        print(f"Retrieving for query: '{q}'", flush=True)
-        retrieved_items = retrieve_context_hybrid(q, db_data, embed_model, embed_tokenizer, top_k=3)
+        print(f"\nQuery: '{q}'")
+        retrieved_items = retrieve_context_hybrid_rerank(
+            q, db_data, faiss_index, embed_model, embed_tokenizer, reranker, device, top_k=3
+        )
         retrievals[q] = retrieved_items
         for idx, item in enumerate(retrieved_items):
             chunk = item["chunk"]
-            print(f"  [{idx+1}] Score: {item['score']:.4f} | Paragraph: {chunk['paragraph_id']} | Source: {chunk['source_doc']}", flush=True)
-            print(f"      Text: {chunk['text'][:120]}...", flush=True)
+            print(f"  [{idx+1}] Rerank Score: {item['score']:.4f} | Paragraph: {chunk['paragraph_id']} | Source: {chunk['source_doc']}")
+            print(f"      Text: {chunk['text'][:120]}...")
             
-    # 5. Load Base Causal Language Model
-    print("\nLoading tokenizer for reader model...", flush=True)
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
-    print("Loading base reader model on CPU...", flush=True)
-    base_model = AutoModelForCausalLM.from_pretrained(model_id)
-    base_model.eval()
-    print("Base model loaded successfully!", flush=True)
+    # 5. Load Fine-tuned Reader Model
+    print(f"\nLoading Reader Model from {args.model_path} on GPU...")
+    tokenizer = AutoTokenizer.from_pretrained(args.model_path)
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model_path,
+        torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+        device_map="auto"
+    )
+    model.eval()
+    print("Reader model loaded successfully!")
     
     # System prompt to guide RAG behavior
     system_prompt = (
@@ -151,13 +181,10 @@ def main():
         "that the policy manual does not provide sufficient details. Do not assume or extrapolate."
     )
     
-    base_rag_responses = []
-    
-    # --- PHASE A: BASE MODEL + RAG INFERENCE ---
-    print("\n--- Running Config B (Base Model + RAG) Inference ---", flush=True)
+    # Run Inference
+    print("\n--- Running RAG Inference ---")
     for i, q in enumerate(questions):
-        print(f"\nProcessing Base+RAG Question {i+1}/3: '{q}'...", flush=True)
-        # Construct context string from retrieved chunks
+        print(f"\nQuestion {i+1}/3: '{q}'")
         retrieved = retrievals[q]
         context_parts = []
         for r in retrieved:
@@ -172,107 +199,10 @@ def main():
         ]
         prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         
-        response = generate_response(base_model, tokenizer, prompt, temp=0.3)
-        base_rag_responses.append(response)
-        
-    # --- PHASE B: LOAD LORA ADAPTERS ---
-    print(f"\nApplying LoRA weights to base model from {adapter_path}...", flush=True)
-    if not os.path.exists(adapter_path):
-        print(f"Error: LoRA adapter weights not found at {adapter_path}. Cannot run tuned configurations.", flush=True)
-        tuned_norag_responses = ["N/A"] * 3
-        tuned_rag_responses = ["N/A"] * 3
-    else:
-        peft_model = PeftModel.from_pretrained(base_model, adapter_path)
-        peft_model.eval()
-        print("LoRA weights applied successfully!", flush=True)
-        
-        # --- PHASE C: TUNED MODEL (NO RAG) INFERENCE ---
-        print("\n--- Running Config A (Tuned Model without RAG) Inference ---", flush=True)
-        tuned_norag_responses = []
-        for i, q in enumerate(questions):
-            print(f"\nProcessing Tuned-NoRAG Question {i+1}/3: '{q}'...", flush=True)
-            # Baseline test prompt format matching fine-tuning evaluation (Phase 4)
-            messages = [{"role": "user", "content": q}]
-            prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            
-            response = generate_response(peft_model, tokenizer, prompt, temp=0.7) # Use 0.7 temp for non-RAG baseline
-            tuned_norag_responses.append(response)
-            
-        # --- PHASE D: TUNED MODEL + RAG INFERENCE ---
-        print("\n--- Running Config C (Tuned Model + RAG) Inference ---", flush=True)
-        tuned_rag_responses = []
-        for i, q in enumerate(questions):
-            print(f"\nProcessing Tuned+RAG Question {i+1}/3: '{q}'...", flush=True)
-            retrieved = retrievals[q]
-            context_parts = []
-            for r in retrieved:
-                chunk = r["chunk"]
-                context_parts.append(f"Paragraph {chunk['paragraph_id']} (from {chunk['source_doc']}):\n{chunk['text']}")
-            context_str = "\n\n".join(context_parts)
-            
-            user_content = f"Contexts:\n{context_str}\n\nQuestion: {q}"
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content}
-            ]
-            prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            
-            response = generate_response(peft_model, tokenizer, prompt, temp=0.3) # Use 0.3 temp for RAG
-            tuned_rag_responses.append(response)
-            
-    # --- PHASE E: GENERATE COMPARATIVE REPORT & SAVE TO FILE ---
-    print("\n" + "="*80, flush=True)
-    print("                  DWP CMG RAG ARCHITECTURE COMPARISON REPORT", flush=True)
-    print("="*80, flush=True)
-    
-    md_lines = [
-        "# DWP CMG RAG Comparative Evaluation Report",
-        "\nThis report provides the non-truncated outputs of the three evaluation configurations on the 3 core policy questions.",
-        "\n## Comparison Matrix\n"
-    ]
-    
-    for i, q in enumerate(questions):
-        print(f"\n[QUESTION {i+1}]", flush=True)
-        print(f"Question: {q}\n", flush=True)
-        
-        md_lines.append(f"### [QUESTION {i+1}] {q}\n")
-        
-        print("--- RETRIEVED CONTEXTS ---", flush=True)
-        md_lines.append("#### Retrieved Contexts:")
-        for idx, item in enumerate(retrievals[q]):
-            chunk = item["chunk"]
-            print(f"({idx+1}) [Score: {item['score']:.4f}] Paragraph {chunk['paragraph_id']} (from {chunk['source_doc']}):", flush=True)
-            print(f"    {chunk['text'][:200]}...", flush=True)
-            md_lines.append(f"- **Paragraph {chunk['paragraph_id']}** (Score: {item['score']:.4f}, Source: `{chunk['source_doc']}`):\n  > {chunk['text']}\n")
-            
-        print("-" * 50, flush=True)
-        
-        print("--- CONFIG A: TUNED MODEL (NO RAG) ---", flush=True)
-        print(tuned_norag_responses[i], flush=True)
-        print("-" * 50, flush=True)
-        
-        print("--- CONFIG B: BASE MODEL + RAG ---", flush=True)
-        print(base_rag_responses[i], flush=True)
-        print("-" * 50, flush=True)
-        
-        print("--- CONFIG C: TUNED MODEL + RAG ---", flush=True)
-        print(tuned_rag_responses[i], flush=True)
-        print("=" * 80, flush=True)
-        
-        md_lines.append("#### Comparative Outputs:")
-        md_lines.append(f"##### Configuration A: Tuned Model (No RAG)\n```text\n{tuned_norag_responses[i]}\n```\n")
-        md_lines.append(f"##### Configuration B: Base Model + RAG\n```text\n{base_rag_responses[i]}\n```\n")
-        md_lines.append(f"##### Configuration C: Tuned Model + RAG\n```text\n{tuned_rag_responses[i]}\n```\n")
-        md_lines.append("---\n")
-        
-    # Save to markdown file in artifact directory
-    artifact_report_path = r"C:\Users\JitendraAsrani\.gemini\antigravity\brain\b3d94206-3538-4480-95d3-c9010fe8f009\full_answers_report.md"
-    try:
-        with open(artifact_report_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(md_lines))
-        print(f"\nSuccessfully wrote full report to {artifact_report_path}", flush=True)
-    except Exception as e:
-        print(f"\nWarning: Could not save report file: {e}", flush=True)
+        response = generate_response(model, tokenizer, prompt, device, temp=0.3)
+        print(f"Response:\n{response}")
+        print("-" * 60)
 
 if __name__ == "__main__":
     main()
+

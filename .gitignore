@@ -6,3 +6,5 @@ vector_db.pt
 *.jsonl
 *.pdf
 .DS_Store
+*.pem
+

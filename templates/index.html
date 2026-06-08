@@ -28,9 +28,9 @@
                     <span class="pulse-dot"></span>
                     <span>POC Environment Active</span>
                 </div>
-                <div class="status-badge cpu">
+                <div class="status-badge live">
                     <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 15h3M1 9h3M1 15h3"/></svg>
-                    <span>CPU-Bound Inference</span>
+                    <span>GPU-Accelerated (NVIDIA A10G)</span>
                 </div>
             </div>
         </header>
@@ -78,81 +78,18 @@
             <!-- A/B/C Evaluation Matrix -->
             <section class="matrix-section">
                 <div class="section-header">
-                    <h2>A / B / C Comparison Matrix</h2>
+                    <h2>Model Comparison Matrix</h2>
                     <span class="badge">Side-by-Side Evaluation</span>
                 </div>
                 
                 <div class="matrix-grid">
-                    <!-- Config A: Tuned (No RAG) -->
-                    <article class="config-card card" id="card-config-a">
-                        <div class="card-header">
-                            <div class="config-info">
-                                <span class="badge config-a-badge">Config A</span>
-                                <h3>Tuned Model (No RAG)</h3>
-                                <p class="model-spec">SmolLM2-360M + LoRA Adapter</p>
-                            </div>
-                            <div class="card-meta">
-                                <span class="time-badge" id="time-a">--</span>
-                            </div>
-                        </div>
-                        <div class="card-body">
-                            <div class="loader-skeleton hidden" id="skeleton-a">
-                                <div class="skeleton-line headline"></div>
-                                <div class="skeleton-line"></div>
-                                <div class="skeleton-line"></div>
-                                <div class="skeleton-line short"></div>
-                            </div>
-                            <div class="card-content empty-state" id="content-a">
-                                <p>Submit a query to generate model output.</p>
-                            </div>
-                        </div>
-                        <div class="card-footer">
-                            <div class="pill tooltip" data-tooltip="Relies solely on training memory. Pre-disposed to hallucination on specific numbers.">Parametric Memory Only</div>
-                            <button class="btn-icon copy-btn hidden" data-target="content-a" title="Copy answer">
-                                <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-                            </button>
-                        </div>
-                    </article>
-
-                    <!-- Config B: Base + RAG -->
-                    <article class="config-card card" id="card-config-b">
-                        <div class="card-header">
-                            <div class="config-info">
-                                <span class="badge config-b-badge">Config B</span>
-                                <h3>Base Model + RAG</h3>
-                                <p class="model-spec">SmolLM2-360M-Instruct + Grounding</p>
-                            </div>
-                            <div class="card-meta">
-                                <span class="time-badge" id="time-b">--</span>
-                            </div>
-                        </div>
-                        <div class="card-body">
-                            <div class="loader-skeleton hidden" id="skeleton-b">
-                                <div class="skeleton-line headline"></div>
-                                <div class="skeleton-line"></div>
-                                <div class="skeleton-line"></div>
-                                <div class="skeleton-line short"></div>
-                            </div>
-                            <div class="card-content empty-state" id="content-b">
-                                <p>Submit a query to generate model output.</p>
-                            </div>
-                        </div>
-                        <div class="card-footer">
-                            <div class="pill tooltip" data-tooltip="Standard instruct model reading retrieved PDF paragraphs. Has factual grounding but style is generic.">Grounding Only</div>
-                            <button class="btn-icon copy-btn hidden" data-target="content-b" title="Copy answer">
-                                <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-                            </button>
-                        </div>
-                    </article>
-
-                    <!-- Config C: Tuned + RAG (Winner) -->
-                    <article class="config-card card premium-card" id="card-config-c">
-                        <div class="premium-ribbon">🏆 Recommended</div>
+                    <!-- Config C: Mistral Base + RAG -->
+                    <article class="config-card card" id="card-config-c">
                         <div class="card-header">
                             <div class="config-info">
                                 <span class="badge config-c-badge">Config C</span>
-                                <h3>Tuned Model + RAG</h3>
-                                <p class="model-spec">SmolLM2-360M + LoRA + Grounding</p>
+                                <h3>Mistral-7B (Base + RAG)</h3>
+                                <p class="model-spec">Mistral-7B-Instruct-v0.3 (Base)</p>
                             </div>
                             <div class="card-meta">
                                 <span class="time-badge" id="time-c">--</span>
@@ -170,8 +107,72 @@
                             </div>
                         </div>
                         <div class="card-footer">
-                            <div class="pill success tooltip" data-tooltip="Combines fine-tuned response format and tone with official vector retrieval. Explains exact rules accurately.">Grounding + Domain Adapter</div>
+                            <div class="pill tooltip" data-tooltip="Standard base model reading retrieved paragraphs. Used as control baseline.">Grounding Only</div>
                             <button class="btn-icon copy-btn hidden" data-target="content-c" title="Copy answer">
+                                <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                            </button>
+                        </div>
+                    </article>
+
+                    <!-- Config A: Mistral Tuned + RAG -->
+                    <article class="config-card card premium-card" id="card-config-a">
+                        <div class="premium-ribbon">Mistral Fine-Tuned</div>
+                        <div class="card-header">
+                            <div class="config-info">
+                                <span class="badge config-a-badge">Config A</span>
+                                <h3>Mistral-7B (Tuned + RAG)</h3>
+                                <p class="model-spec">Mistral-7B-Instruct-v0.3 + QLoRA</p>
+                            </div>
+                            <div class="card-meta">
+                                <span class="time-badge" id="time-a">--</span>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <div class="loader-skeleton hidden" id="skeleton-a">
+                                <div class="skeleton-line headline"></div>
+                                <div class="skeleton-line"></div>
+                                <div class="skeleton-line"></div>
+                                <div class="skeleton-line short"></div>
+                            </div>
+                            <div class="card-content empty-state" id="content-a">
+                                <p>Submit a query to generate model output.</p>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <div class="pill success tooltip" data-tooltip="Combines Mistral's tone adaptation with local BGE vector search.">Grounding + Domain Adapter</div>
+                            <button class="btn-icon copy-btn hidden" data-target="content-a" title="Copy answer">
+                                <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                            </button>
+                        </div>
+                    </article>
+
+                    <!-- Config B: Qwen Tuned + RAG -->
+                    <article class="config-card card premium-card" id="card-config-b">
+                        <div class="premium-ribbon">Qwen Fine-Tuned</div>
+                        <div class="card-header">
+                            <div class="config-info">
+                                <span class="badge config-b-badge">Config B</span>
+                                <h3>Qwen-2.5-7B (Tuned + RAG)</h3>
+                                <p class="model-spec">Qwen-2.5-7B-Instruct + QLoRA</p>
+                            </div>
+                            <div class="card-meta">
+                                <span class="time-badge" id="time-b">--</span>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <div class="loader-skeleton hidden" id="skeleton-b">
+                                <div class="skeleton-line headline"></div>
+                                <div class="skeleton-line"></div>
+                                <div class="skeleton-line"></div>
+                                <div class="skeleton-line short"></div>
+                            </div>
+                            <div class="card-content empty-state" id="content-b">
+                                <p>Submit a query to generate model output.</p>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <div class="pill success tooltip" data-tooltip="Combines Qwen's tone adaptation with local BGE vector search.">Grounding + Domain Adapter</div>
+                            <button class="btn-icon copy-btn hidden" data-target="content-b" title="Copy answer">
                                 <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                             </button>
                         </div>

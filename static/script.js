@@ -95,12 +95,12 @@ document.addEventListener("DOMContentLoaded", () => {
         // Hide copy buttons during load
         copyBtns.forEach(btn => btn.classList.add("hidden"));
 
-        // Show card skeletons, clear content classes & times
+        // Show card skeletons, clear content classes & set to waiting
         Object.keys(skeletons).forEach(key => {
             skeletons[key].classList.remove("hidden");
             contents[key].classList.add("empty-state");
             contents[key].innerHTML = "";
-            times[key].textContent = "generating...";
+            times[key].textContent = "waiting...";
         });
 
         // Reset grounding dashboard
@@ -111,7 +111,8 @@ document.addEventListener("DOMContentLoaded", () => {
         retrievedChunksContainer.innerHTML = "";
 
         try {
-            const response = await fetch("/api/query", {
+            // Step 1: Retrieve context chunks first (takes < 0.1s)
+            const retrieveResponse = await fetch("/api/query/retrieve", {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json"
@@ -119,32 +120,63 @@ document.addEventListener("DOMContentLoaded", () => {
                 body: JSON.stringify({ query })
             });
 
-            if (!response.ok) {
-                throw new Error(`Server returned code ${response.status}`);
+            if (!retrieveResponse.ok) {
+                throw new Error(`Retrieval failed with code ${retrieveResponse.status}`);
             }
 
-            const data = await response.json();
-            
-            if (data.error) {
-                throw new Error(data.error);
+            const retrieveData = await retrieveResponse.json();
+            if (retrieveData.error) {
+                throw new Error(retrieveData.error);
             }
 
-            // Bind Config A
-            renderConfigResult("a", data.config_a.response, data.config_a.time);
-            
-            // Bind Config B
-            renderConfigResult("b", data.config_b.response, data.config_b.time);
-            
-            // Bind Config C (Winner)
-            renderConfigResult("c", data.config_c.response, data.config_c.time);
-
-            // Populate retrieved chunks
-            renderRetrievedChunks(data.retrieved_contexts, data.retrieval_time);
-
-            // Enable grounding dashboard and auto-expand it for transparent visibility
+            // Populate and show the grounding dashboard immediately
+            renderRetrievedChunks(retrieveData.retrieved_contexts, retrieveData.retrieval_time);
             toggleRetrievalBtn.disabled = false;
             retrievalSection.classList.remove("collapsed");
             retrievalContent.classList.remove("hidden");
+
+            // Step 2: Generate answers sequentially (to avoid GPU hardware contention)
+            // Order: Config C (Base Model) -> Config A (Mistral Tuned) -> Config B (Qwen Tuned)
+            const modelsToRun = [
+                { key: "c", id: "mistral_base", label: "Mistral Base" },
+                { key: "a", id: "mistral_tuned", label: "Mistral Fine-Tuned" },
+                { key: "b", id: "qwen_tuned", label: "Qwen Fine-Tuned" }
+            ];
+
+            for (const model of modelsToRun) {
+                times[model.key].textContent = "generating...";
+                try {
+                    const genResponse = await fetch("/api/query/generate", {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json"
+                        },
+                        body: JSON.stringify({
+                            query: query,
+                            model: model.id,
+                            contexts: retrieveData.retrieved_contexts
+                        })
+                    });
+
+                    if (!genResponse.ok) {
+                        throw new Error(`${model.label} failed with code ${genResponse.status}`);
+                    }
+
+                    const genData = await genResponse.json();
+                    if (genData.error) {
+                        throw new Error(genData.error);
+                    }
+
+                    // Render result immediately on completion
+                    renderConfigResult(model.key, genData.response, genData.time);
+                } catch (genError) {
+                    console.error(genError);
+                    skeletons[model.key].classList.add("hidden");
+                    contents[model.key].classList.add("empty-state");
+                    contents[model.key].innerHTML = `<p style="color: var(--color-pink)">Error: ${genError.message}</p>`;
+                    times[model.key].textContent = "error";
+                }
+            }
 
         } catch (error) {
             console.error(error);
