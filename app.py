@@ -160,6 +160,15 @@ API_KEY = os.environ.get("API_KEY", "dwp-cmg-sec-key-7d9a1f8c")
 
 def check_auth():
     provided_key = request.headers.get("X-API-Key") or request.args.get("api_key")
+    
+    # Check JSON body fallback (useful if CloudFront/proxy strips custom headers)
+    if not provided_key and request.is_json:
+        try:
+            body = request.get_json(silent=True) or {}
+            provided_key = body.get("api_key") or body.get("X-API-Key")
+        except Exception:
+            pass
+            
     if provided_key != API_KEY:
         return jsonify({"error": "Unauthorized: Invalid or missing API key."}), 401
     return None

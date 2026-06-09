@@ -11,7 +11,12 @@ document.addEventListener("DOMContentLoaded", () => {
     // Auth / API Key
     const apiKeyInput = document.getElementById("api-key-input");
     if (apiKeyInput) {
-        apiKeyInput.value = localStorage.getItem("dwp_api_key") || "";
+        let storedKey = localStorage.getItem("dwp_api_key");
+        if (!storedKey || storedKey === "null" || storedKey.trim() === "") {
+            storedKey = "dwp-cmg-sec-key-7d9a1f8c";
+            localStorage.setItem("dwp_api_key", storedKey);
+        }
+        apiKeyInput.value = storedKey;
         apiKeyInput.addEventListener("input", (e) => {
             localStorage.setItem("dwp_api_key", e.target.value.trim());
         });
@@ -136,7 +141,10 @@ document.addEventListener("DOMContentLoaded", () => {
                     "Content-Type": "application/json",
                     "X-API-Key": localStorage.getItem("dwp_api_key") || ""
                 },
-                body: JSON.stringify({ query })
+                body: JSON.stringify({ 
+                    query,
+                    api_key: localStorage.getItem("dwp_api_key") || ""
+                })
             });
 
             if (!retrieveResponse.ok) {
@@ -178,7 +186,8 @@ document.addEventListener("DOMContentLoaded", () => {
                             query: query,
                             model: model.id,
                             use_rag: model.use_rag,
-                            contexts: model.use_rag ? retrieveData.retrieved_contexts : []
+                            contexts: model.use_rag ? retrieveData.retrieved_contexts : [],
+                            api_key: localStorage.getItem("dwp_api_key") || ""
                         })
                     });
 
