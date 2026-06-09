@@ -374,7 +374,7 @@ body {
     display: flex;
     flex-direction: column;
     justify-content: space-between;
-    height: 480px; /* Uniform height */
+    height: 420px; /* Uniform height */
     position: relative;
     background: var(--bg-card);
 }

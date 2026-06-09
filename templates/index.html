@@ -81,15 +81,14 @@
                     <h2>Model Comparison Matrix</h2>
                     <span class="badge">Side-by-Side Evaluation</span>
                 </div>
-                
-                <div class="matrix-grid">
-                    <!-- Config C: Mistral Base + RAG -->
+                       <div class="matrix-grid">
+                    <!-- Column 1, Row 1: Config C: Mistral Base + RAG -->
                     <article class="config-card card" id="card-config-c">
                         <div class="card-header">
                             <div class="config-info">
                                 <span class="badge config-c-badge">Config C</span>
-                                <h3>Mistral-7B (Base + RAG)</h3>
-                                <p class="model-spec">Mistral-7B-Instruct-v0.3 (Base)</p>
+                                <h3>Mistral-7B Base + RAG</h3>
+                                <p class="model-spec">Base model with RAG context</p>
                             </div>
                             <div class="card-meta">
                                 <span class="time-badge" id="time-c">--</span>
@@ -114,14 +113,14 @@
                         </div>
                     </article>
 
-                    <!-- Config A: Mistral Tuned + RAG -->
+                    <!-- Column 2, Row 1: Config A: Mistral Tuned + RAG -->
                     <article class="config-card card premium-card" id="card-config-a">
-                        <div class="premium-ribbon">Mistral Fine-Tuned</div>
+                        <div class="premium-ribbon">Mistral Tuned</div>
                         <div class="card-header">
                             <div class="config-info">
                                 <span class="badge config-a-badge">Config A</span>
-                                <h3>Mistral-7B (Tuned + RAG)</h3>
-                                <p class="model-spec">Mistral-7B-Instruct-v0.3 + QLoRA</p>
+                                <h3>Mistral-7B Tuned + RAG</h3>
+                                <p class="model-spec">Fine-tuned model with RAG context</p>
                             </div>
                             <div class="card-meta">
                                 <span class="time-badge" id="time-a">--</span>
@@ -146,14 +145,14 @@
                         </div>
                     </article>
 
-                    <!-- Config B: Qwen Tuned + RAG -->
+                    <!-- Column 3, Row 1: Config B: Qwen Tuned + RAG -->
                     <article class="config-card card premium-card" id="card-config-b">
-                        <div class="premium-ribbon">Qwen Fine-Tuned</div>
+                        <div class="premium-ribbon">Qwen Tuned</div>
                         <div class="card-header">
                             <div class="config-info">
                                 <span class="badge config-b-badge">Config B</span>
-                                <h3>Qwen-2.5-7B (Tuned + RAG)</h3>
-                                <p class="model-spec">Qwen-2.5-7B-Instruct + QLoRA</p>
+                                <h3>Qwen-2.5-7B Tuned + RAG</h3>
+                                <p class="model-spec">Fine-tuned model with RAG context</p>
                             </div>
                             <div class="card-meta">
                                 <span class="time-badge" id="time-b">--</span>
@@ -177,7 +176,100 @@
                             </button>
                         </div>
                     </article>
-                </div>
+
+                    <!-- Column 1, Row 2: Config D: Mistral Base No RAG -->
+                    <article class="config-card card" id="card-config-d">
+                        <div class="card-header">
+                            <div class="config-info">
+                                <span class="badge config-c-badge">Config D</span>
+                                <h3>Mistral-7B Base (No RAG)</h3>
+                                <p class="model-spec">Base model, answering from memory</p>
+                            </div>
+                            <div class="card-meta">
+                                <span class="time-badge" id="time-d">--</span>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <div class="loader-skeleton hidden" id="skeleton-d">
+                                <div class="skeleton-line headline"></div>
+                                <div class="skeleton-line"></div>
+                                <div class="skeleton-line"></div>
+                                <div class="skeleton-line short"></div>
+                            </div>
+                            <div class="card-content empty-state" id="content-d">
+                                <p>Submit a query to generate model output.</p>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <div class="pill tooltip" data-tooltip="Relies strictly on pre-trained internet knowledge. No specific policy details.">Parametric Memory Only</div>
+                            <button class="btn-icon copy-btn hidden" data-target="content-d" title="Copy answer">
+                                <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                            </button>
+                        </div>
+                    </article>
+
+                    <!-- Column 2, Row 2: Config E: Mistral Tuned No RAG -->
+                    <article class="config-card card" id="card-config-e">
+                        <div class="card-header">
+                            <div class="config-info">
+                                <span class="badge config-a-badge">Config E</span>
+                                <h3>Mistral-7B Tuned (No RAG)</h3>
+                                <p class="model-spec">Fine-tuned model, answering from memory</p>
+                            </div>
+                            <div class="card-meta">
+                                <span class="time-badge" id="time-e">--</span>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <div class="loader-skeleton hidden" id="skeleton-e">
+                                <div class="skeleton-line headline"></div>
+                                <div class="skeleton-line"></div>
+                                <div class="skeleton-line"></div>
+                                <div class="skeleton-line short"></div>
+                            </div>
+                            <div class="card-content empty-state" id="content-e">
+                                <p>Submit a query to generate model output.</p>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <div class="pill tooltip" data-tooltip="Relies on fine-tuned memory weights without document search lookup.">Fine-Tuned Memory Only</div>
+                            <button class="btn-icon copy-btn hidden" data-target="content-e" title="Copy answer">
+                                <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                            </button>
+                        </div>
+                    </article>
+
+                    <!-- Column 3, Row 2: Config F: Qwen Tuned No RAG -->
+                    <article class="config-card card" id="card-config-f">
+                        <div class="card-header">
+                            <div class="config-info">
+                                <span class="badge config-b-badge">Config F</span>
+                                <h3>Qwen-2.5-7B Tuned (No RAG)</h3>
+                                <p class="model-spec">Fine-tuned model, answering from memory</p>
+                            </div>
+                            <div class="card-meta">
+                                <span class="time-badge" id="time-f">--</span>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <div class="loader-skeleton hidden" id="skeleton-f">
+                                <div class="skeleton-line headline"></div>
+                                <div class="skeleton-line"></div>
+                                <div class="skeleton-line"></div>
+                                <div class="skeleton-line short"></div>
+                            </div>
+                            <div class="card-content empty-state" id="content-f">
+                                <p>Submit a query to generate model output.</p>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <div class="pill tooltip" data-tooltip="Relies on fine-tuned memory weights without document search lookup.">Fine-Tuned Memory Only</div>
+                            <button class="btn-icon copy-btn hidden" data-target="content-f" title="Copy answer">
+                                <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                            </button>
+                        </div>
+                    </article>
+                </div>    </div>
             </section>
 
             <!-- Grounding & Retrieval Data -->

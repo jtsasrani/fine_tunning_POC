@@ -198,6 +198,7 @@ def handle_generate():
     query = data.get("query", "").strip()
     model_name = data.get("model", "").strip()
     contexts = data.get("contexts", [])
+    use_rag = data.get("use_rag", True)
     
     if not query or not model_name:
         return jsonify({"error": "Query and model name are required."}), 400
@@ -206,22 +207,31 @@ def handle_generate():
         return jsonify({"error": f"Model '{model_name}' is not loaded."}), 400
         
     try:
-        # Format contexts into a single string
-        context_parts = []
-        for ctx in contexts:
-            context_parts.append(f"Paragraph {ctx.get('paragraph_id')} (from {ctx.get('source_doc')}):\n{ctx.get('text')}")
-        context_str = "\n\n".join(context_parts)
-        
-        user_content = f"Contexts:\n{context_str}\n\nQuestion: {query}"
-        
-        # Apply prompt template based on model
         tok = tokenizer_dict[model_name]
         mod = model_dict[model_name]
         device = "cuda" if torch.cuda.is_available() else "cpu"
         
+        if use_rag:
+            # Format contexts into a single string
+            context_parts = []
+            for ctx in contexts:
+                context_parts.append(f"Paragraph {ctx.get('paragraph_id')} (from {ctx.get('source_doc')}):\n{ctx.get('text')}")
+            context_str = "\n\n".join(context_parts)
+            
+            user_content = f"Contexts:\n{context_str}\n\nQuestion: {query}"
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_content}
+            ]
+        else:
+            messages = [
+                {"role": "user", "content": query}
+            ]
+            
         prompt = tok.apply_chat_template(
-            [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user_content}],
-            tokenize=False, add_generation_prompt=True
+            messages,
+            tokenize=False,
+            add_generation_prompt=True
         )
         
         t_start = time.time()

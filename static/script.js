@@ -12,21 +12,30 @@ document.addEventListener("DOMContentLoaded", () => {
     const skeletons = {
         a: document.getElementById("skeleton-a"),
         b: document.getElementById("skeleton-b"),
-        c: document.getElementById("skeleton-c")
+        c: document.getElementById("skeleton-c"),
+        d: document.getElementById("skeleton-d"),
+        e: document.getElementById("skeleton-e"),
+        f: document.getElementById("skeleton-f")
     };
     
     // Contents
     const contents = {
         a: document.getElementById("content-a"),
         b: document.getElementById("content-b"),
-        c: document.getElementById("content-c")
+        c: document.getElementById("content-c"),
+        d: document.getElementById("content-d"),
+        e: document.getElementById("content-e"),
+        f: document.getElementById("content-f")
     };
     
     // Times
     const times = {
         a: document.getElementById("time-a"),
         b: document.getElementById("time-b"),
-        c: document.getElementById("time-c")
+        c: document.getElementById("time-c"),
+        d: document.getElementById("time-d"),
+        e: document.getElementById("time-e"),
+        f: document.getElementById("time-f")
     };
     
     // Copy buttons
@@ -136,11 +145,14 @@ document.addEventListener("DOMContentLoaded", () => {
             retrievalContent.classList.remove("hidden");
 
             // Step 2: Generate answers sequentially (to avoid GPU hardware contention)
-            // Order: Config C (Base Model) -> Config A (Mistral Tuned) -> Config B (Qwen Tuned)
+            // Sequence: Mistral Base + RAG -> Mistral Base (No RAG) -> Mistral Tuned + RAG -> Mistral Tuned (No RAG) -> Qwen Tuned + RAG -> Qwen Tuned (No RAG)
             const modelsToRun = [
-                { key: "c", id: "mistral_base", label: "Mistral Base" },
-                { key: "a", id: "mistral_tuned", label: "Mistral Fine-Tuned" },
-                { key: "b", id: "qwen_tuned", label: "Qwen Fine-Tuned" }
+                { key: "c", id: "mistral_base", label: "Mistral Base + RAG", use_rag: true },
+                { key: "d", id: "mistral_base", label: "Mistral Base (No RAG)", use_rag: false },
+                { key: "a", id: "mistral_tuned", label: "Mistral Tuned + RAG", use_rag: true },
+                { key: "e", id: "mistral_tuned", label: "Mistral Tuned (No RAG)", use_rag: false },
+                { key: "b", id: "qwen_tuned", label: "Qwen Tuned + RAG", use_rag: true },
+                { key: "f", id: "qwen_tuned", label: "Qwen Tuned (No RAG)", use_rag: false }
             ];
 
             for (const model of modelsToRun) {
@@ -154,7 +166,8 @@ document.addEventListener("DOMContentLoaded", () => {
                         body: JSON.stringify({
                             query: query,
                             model: model.id,
-                            contexts: retrieveData.retrieved_contexts
+                            use_rag: model.use_rag,
+                            contexts: model.use_rag ? retrieveData.retrieved_contexts : []
                         })
                     });
 
