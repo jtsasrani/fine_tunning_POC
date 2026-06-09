@@ -156,12 +156,24 @@ def initialize_models():
         model_dict[name].eval()
         print(f"Loaded '{name}' reader model successfully!", flush=True)
 
+API_KEY = os.environ.get("API_KEY", "dwp-cmg-sec-key-7d9a1f8c")
+
+def check_auth():
+    provided_key = request.headers.get("X-API-Key") or request.args.get("api_key")
+    if provided_key != API_KEY:
+        return jsonify({"error": "Unauthorized: Invalid or missing API key."}), 401
+    return None
+
 @app.route("/")
 def index():
     return render_template("index.html")
 
 @app.route("/api/query/retrieve", methods=["POST"])
 def handle_retrieve():
+    auth_err = check_auth()
+    if auth_err:
+        return auth_err
+        
     data = request.get_json() or {}
     query = data.get("query", "").strip()
     if not query:
@@ -194,6 +206,10 @@ def handle_retrieve():
 
 @app.route("/api/query/generate", methods=["POST"])
 def handle_generate():
+    auth_err = check_auth()
+    if auth_err:
+        return auth_err
+        
     data = request.get_json() or {}
     query = data.get("query", "").strip()
     model_name = data.get("model", "").strip()
@@ -261,12 +277,14 @@ def handle_generate():
         print(f"Error in generate for {model_name}: {e}", flush=True)
         return jsonify({"error": str(e)}), 500
 
+print("Starting Flask application. Preloading GPU models in 4-bit...", flush=True)
+try:
+    initialize_models()
+    print("All models loaded successfully on GPU.", flush=True)
+except Exception as e:
+    print(f"Failed to initialize models: {e}", flush=True)
+
 if __name__ == "__main__":
-    print("Starting Flask application. Preloading GPU models in 4-bit...", flush=True)
-    try:
-        initialize_models()
-        print("All models loaded successfully on GPU. Web server running on http://127.0.0.1:5000", flush=True)
-        app.run(host="127.0.0.1", port=5000, debug=False)
-    except Exception as e:
-        print(f"Failed to initialize models or start server: {e}", flush=True)
+    print("Web server running on http://127.0.0.1:5000", flush=True)
+    app.run(host="127.0.0.1", port=5000, debug=False)
 

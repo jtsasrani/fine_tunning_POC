@@ -770,3 +770,31 @@ body {
 .copy-btn.copied svg {
     color: var(--color-green);
 }
+
+/* Auth / API Key Input */
+.header-auth {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.api-key-field {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    padding: 0.5rem 0.85rem;
+    border-radius: 20px;
+    font-size: 0.85rem;
+    outline: none;
+    transition: border-color var(--transition-speed), box-shadow var(--transition-speed);
+    width: 180px;
+}
+
+.api-key-field:focus {
+    border-color: var(--color-accent);
+    box-shadow: 0 0 10px rgba(99, 102, 241, 0.2);
+}
+
+.api-key-field::placeholder {
+    color: var(--text-muted);
+}

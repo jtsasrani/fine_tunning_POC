@@ -8,6 +8,15 @@ document.addEventListener("DOMContentLoaded", () => {
     // Quick starts
     const quickStartBtns = document.querySelectorAll(".quick-start-btn");
     
+    // Auth / API Key
+    const apiKeyInput = document.getElementById("api-key-input");
+    if (apiKeyInput) {
+        apiKeyInput.value = localStorage.getItem("dwp_api_key") || "";
+        apiKeyInput.addEventListener("input", (e) => {
+            localStorage.setItem("dwp_api_key", e.target.value.trim());
+        });
+    }
+    
     // Skeletons
     const skeletons = {
         a: document.getElementById("skeleton-a"),
@@ -124,7 +133,8 @@ document.addEventListener("DOMContentLoaded", () => {
             const retrieveResponse = await fetch("/api/query/retrieve", {
                 method: "POST",
                 headers: {
-                    "Content-Type": "application/json"
+                    "Content-Type": "application/json",
+                    "X-API-Key": localStorage.getItem("dwp_api_key") || ""
                 },
                 body: JSON.stringify({ query })
             });
@@ -161,7 +171,8 @@ document.addEventListener("DOMContentLoaded", () => {
                     const genResponse = await fetch("/api/query/generate", {
                         method: "POST",
                         headers: {
-                            "Content-Type": "application/json"
+                            "Content-Type": "application/json",
+                            "X-API-Key": localStorage.getItem("dwp_api_key") || ""
                         },
                         body: JSON.stringify({
                             query: query,
