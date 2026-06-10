@@ -264,7 +264,7 @@ def handle_generate():
         with torch.no_grad():
             outputs = mod.generate(
                 **inputs,
-                max_new_tokens=300,
+                max_new_tokens=512,
                 temperature=0.3,
                 top_p=0.9,
                 repetition_penalty=1.2,

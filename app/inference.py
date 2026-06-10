@@ -131,7 +131,7 @@ class DWPInferenceEngine:
             })
         return retrieved
 
-    def generate(self, model_name, query, retrieved_items, max_tokens=300):
+    def generate(self, model_name, query, retrieved_items, max_tokens=512):
         if model_name not in self.model_dict:
             return "Model not loaded.", 0.0
             
