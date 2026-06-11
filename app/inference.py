@@ -51,7 +51,7 @@ class DWPInferenceEngine:
             print(f"Loaded '{name}' successfully.")
             
         self.system_prompt = (
-            "You are an expert Decision Maker helper for the DWP CMG. Answer the user's question "
+            "You are an expert Decision Maker helper for the DWP CMS. Answer the user's question "
             "accurately and professionally using ONLY the provided official policy contexts. "
             "State exact rules, percentages, and paragraph numbers if they are present in the context. "
             "If the context does not contain the information needed to answer the question, state clearly "
@@ -143,7 +143,13 @@ class DWPInferenceEngine:
         context_parts = []
         for r in retrieved_items:
             chunk = r["chunk"]
-            context_parts.append(f"Paragraph {chunk['paragraph_id']} (from {chunk['source_doc']}):\n{chunk['text']}")
+            pid = chunk.get('paragraph_id', '')
+            doc = chunk.get('source_doc', '')
+            text = chunk.get('text', '')
+            if pid.startswith("L_"):
+                context_parts.append(f"Context from {doc}:\n{text}")
+            else:
+                context_parts.append(f"Paragraph {pid} (from {doc}):\n{text}")
         context_str = "\n\n".join(context_parts)
         
         user_content = f"Contexts:\n{context_str}\n\nQuestion: {query}"

@@ -25,7 +25,7 @@ model_dict = {}
 
 # System prompt for RAG answers
 SYSTEM_PROMPT = (
-    "You are an expert Decision Maker helper for the DWP CMG. Answer the user's question "
+    "You are an expert Decision Maker helper for the DWP CMS. Answer the user's question "
     "accurately and professionally using ONLY the provided official policy contexts. "
     "State exact rules, percentages, and paragraph numbers if they are present in the context. "
     "If the context does not contain the information needed to answer the question, state clearly "
@@ -240,7 +240,13 @@ def handle_generate():
             # Format contexts into a single string
             context_parts = []
             for ctx in contexts:
-                context_parts.append(f"Paragraph {ctx.get('paragraph_id')} (from {ctx.get('source_doc')}):\n{ctx.get('text')}")
+                pid = ctx.get('paragraph_id', '')
+                doc = ctx.get('source_doc', '')
+                text = ctx.get('text', '')
+                if pid.startswith("L_"):
+                    context_parts.append(f"Context from {doc}:\n{text}")
+                else:
+                    context_parts.append(f"Paragraph {pid} (from {doc}):\n{text}")
             context_str = "\n\n".join(context_parts)
             
             user_content = f"Contexts:\n{context_str}\n\nQuestion: {query}"
