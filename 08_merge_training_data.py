@@ -1,12 +1,7 @@
 import os
 import json
 import random
-
-def get_jaccard_sim(str1, str2):
-    a = set(str1.lower().split())
-    b = set(str2.lower().split())
-    c = a.intersection(b)
-    return float(len(c)) / (len(a) + len(b) - len(c)) if (len(a) + len(b) - len(c)) > 0 else 0
+from datasketch import MinHash, MinHashLSH
 
 def merge_and_split():
     input_file = "data/llm_generated_training_data.jsonl"
@@ -24,13 +19,15 @@ def merge_and_split():
         
     print(f"Loaded {len(raw_data)} total raw samples.")
     
-    # Deduplicate
+    # Deduplicate using MinHash + LSH
     unique_samples = []
     seen_instructions = set()
     dup_count = 0
     fuzzy_dup_count = 0
     
-    for item in raw_data:
+    lsh = MinHashLSH(threshold=0.85, num_perm=128)
+    
+    for idx, item in enumerate(raw_data):
         inst = item["instruction"].strip()
         
         # 1. Exact match deduplication
@@ -38,17 +35,23 @@ def merge_and_split():
             dup_count += 1
             continue
             
-        # 2. Fuzzy Jaccard match deduplication
-        is_fuzzy_dup = False
-        for existing in unique_samples:
-            if get_jaccard_sim(inst, existing["instruction"]) > 0.85:
-                is_fuzzy_dup = True
-                fuzzy_dup_count += 1
-                break
-                
-        if not is_fuzzy_dup:
-            seen_instructions.add(inst)
-            unique_samples.append(item)
+        # 2. Fuzzy match deduplication via MinHash LSH
+        words = [w.strip() for w in inst.lower().split() if w.strip()]
+        if not words:
+            continue
+            
+        m = MinHash(num_perm=128)
+        for w in words:
+            m.update(w.encode('utf-8'))
+            
+        results = lsh.query(m)
+        if results:
+            fuzzy_dup_count += 1
+            continue
+            
+        seen_instructions.add(inst)
+        lsh.insert(f"idx_{idx}", m)
+        unique_samples.append(item)
             
     print(f"Deduplication results:")
     print(f"  Exact duplicates removed: {dup_count}")
@@ -83,6 +86,20 @@ def merge_and_split():
         for item in val_split:
             f.write(json.dumps(item, ensure_ascii=False) + '\n')
             
+    # Save a separate gold-standard evaluation set of 35 items from the validation split
+    output_eval = "data/evaluation_set.jsonl"
+    eval_set = val_split[:35]
+    with open(output_eval, 'w', encoding='utf-8') as f:
+        for item in eval_set:
+            eval_item = {
+                "question": item["instruction"],
+                "ground_truth": item["output"],
+                "paragraph_id": item.get("paragraph_id", ""),
+                "source_doc": item.get("source_doc", "")
+            }
+            f.write(json.dumps(eval_item, ensure_ascii=False) + '\n')
+            
+    print(f"Created gold-standard evaluation set at {output_eval} with {len(eval_set)} samples.")
     print(f"Saved files successfully to 'data/' directory.")
 
 if __name__ == "__main__":

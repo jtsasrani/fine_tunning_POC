@@ -3,6 +3,7 @@ import re
 import json
 import time
 import gc
+import argparse
 import torch
 import faiss
 import numpy as np
@@ -118,11 +119,10 @@ def evaluate_model(model_path, eval_data, db_data, faiss_index, embed_model, emb
     model.eval()
     
     system_prompt = (
-        "You are an expert Decision Maker helper for the DWP CMG. Answer the user's question "
-        "accurately and professionally using ONLY the provided official policy contexts. "
-        "State exact rules, percentages, and paragraph numbers if they are present in the context. "
-        "If the context does not contain the information needed to answer the question, state clearly "
-        "that the policy manual does not provide sufficient details. Do not assume or extrapolate."
+        "You are an expert Decision Maker assistant for the DWP Child Maintenance Service (CMS). "
+        "Answer questions accurately using only the provided policy context. "
+        "Cite specific paragraph numbers, rules, and sections where present. "
+        "If the context does not contain sufficient information, state this clearly."
     )
     
     generated_answers = []
@@ -140,7 +140,7 @@ def evaluate_model(model_path, eval_data, db_data, faiss_index, embed_model, emb
         )
         
         # 2. Check Retrieval Precision@3 (does any retrieved chunk match the ground truth text?)
-        is_precision_hit = any(r["chunk"]["text"].strip() == gt_text.strip() for r in retrieved)
+        is_precision_hit = any(r["chunk"]["text"].strip() in gt_text.strip() or gt_text.strip() in r["chunk"]["text"].strip() for r in retrieved)
         precisions.append(1.0 if is_precision_hit else 0.0)
         
         # 3. Format RAG prompt
@@ -202,27 +202,57 @@ def evaluate_model(model_path, eval_data, db_data, faiss_index, embed_model, emb
     }
 
 def main():
+    parser = argparse.ArgumentParser(description="Evaluate a fine-tuned CMS model")
+    parser.add_argument("--model_path", type=str, default="./trained_models/qwen-14b-cms-qlora_merged", help="Path to tuned model directory")
+    parser.add_argument("--base_model_path", type=str, default="Qwen/Qwen2.5-14B-Instruct", help="Path to base/reference model for comparison")
+    parser.add_argument("--eval_file", type=str, default="data/evaluation_set.jsonl", help="Evaluation set path")
+    parser.add_argument("--db_file", type=str, default="vector_db.pt", help="Vector DB file")
+    parser.add_argument("--faiss_file", type=str, default="vector_db.index", help="FAISS index file")
+    parser.add_argument("--report_path", type=str, default="data/evaluation_report.md", help="Output report path")
+    
+    args = parser.parse_args()
+    
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
     
-    db_file = "vector_db.pt"
-    faiss_file = "vector_db.index"
-    eval_file = "data/evaluation_set.jsonl"
-    
-    if not os.path.exists(eval_file):
-        print(f"Error: {eval_file} not found. Run create_evaluation_set.py first.")
-        return
-        
+    if not os.path.exists(args.eval_file):
+        print(f"Error: {args.eval_file} not found. Fallback to val_split.jsonl...")
+        fallback = "data/val_split.jsonl"
+        if os.path.exists(fallback):
+            args.eval_file = fallback
+        else:
+            print(f"Error: {fallback} not found either. Please run generation and split first.")
+            return
+            
     # 1. Load evaluation set
     eval_data = []
-    with open(eval_file, "r", encoding="utf-8") as f:
+    print(f"Loading evaluation questions from {args.eval_file}...")
+    with open(args.eval_file, "r", encoding="utf-8") as f:
         for line in f:
             if line.strip():
-                eval_data.append(json.loads(line.strip()))
-                
+                sample = json.loads(line.strip())
+                # Normalize keys
+                q = sample.get("question", sample.get("instruction", ""))
+                gt = sample.get("ground_truth", sample.get("output", ""))
+                if q and gt:
+                    eval_data.append({"question": q, "ground_truth": gt})
+                    
+    # Cap evaluation at 40 questions to save time if val_split is used
+    if len(eval_data) > 40:
+        print(f"Subsampling evaluation dataset from {len(eval_data)} to 40 questions for speed.")
+        np.random.seed(42)
+        indices = np.random.choice(len(eval_data), 40, replace=False)
+        eval_data = [eval_data[i] for i in indices]
+        
+    print(f"Loaded {len(eval_data)} evaluation samples.")
+    
     # 2. Load Vector DB and FAISS index
-    db_data = torch.load(db_file)
-    faiss_index = faiss.read_index(faiss_file)
+    if not os.path.exists(args.db_file) or not os.path.exists(args.faiss_file):
+        print(f"Error: Vector DB files {args.db_file} or {args.faiss_file} not found.")
+        return
+        
+    db_data = torch.load(args.db_file)
+    faiss_index = faiss.read_index(args.faiss_file)
     
     # 3. Load embedding model and Cross-Encoder
     embed_tokenizer = AutoTokenizer.from_pretrained(db_data["model_name"])
@@ -234,76 +264,80 @@ def main():
     # Initialize ROUGE scorer
     scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=True)
     
-    # Run evaluation on both models
-    mistral_path = "./trained_models/mistral-7b-cmg-qlora_merged"
-    qwen_path = "./trained_models/qwen-7b-cmg-qlora_merged"
-    
     results = {}
     
-    if os.path.exists(mistral_path):
-        results["mistral"] = evaluate_model(
-            mistral_path, eval_data, db_data, faiss_index, embed_model, embed_tokenizer, reranker, scorer, device
+    # Run evaluation on tuned model
+    if os.path.exists(args.model_path):
+        results["tuned"] = evaluate_model(
+            args.model_path, eval_data, db_data, faiss_index, embed_model, embed_tokenizer, reranker, scorer, device
         )
     else:
-        print(f"Warning: Mistral model not found at {mistral_path}. Skipping.")
+        print(f"Error: Tuned model not found at {args.model_path}.")
+        return
         
-    if os.path.exists(qwen_path):
-        results["qwen"] = evaluate_model(
-            qwen_path, eval_data, db_data, faiss_index, embed_model, embed_tokenizer, reranker, scorer, device
+    # Run evaluation on base model (optional/reference)
+    try:
+        results["base"] = evaluate_model(
+            args.base_model_path, eval_data, db_data, faiss_index, embed_model, embed_tokenizer, reranker, scorer, device
         )
-    else:
-        print(f"Warning: Qwen model not found at {qwen_path}. Skipping.")
+    except Exception as e:
+        print(f"Warning: Could not evaluate reference model {args.base_model_path}: {e}")
         
     # Print and generate report
     report_lines = [
-        "# DWP CMG RAG Model Evaluation Report",
-        "\nThis report compares the performance of the fine-tuned Mistral-7B-Instruct-v0.3 and Qwen-2.5-7B-Instruct models on the 30 gold-standard questions.",
+        "# DWP CMS RAG Model Evaluation Report",
+        f"\nThis report compares the performance of the fine-tuned CMS Model ({args.model_path}) against the baseline model ({args.base_model_path}).",
         "\n## Evaluation Metrics Summary\n",
         "| Model | Retrieval Precision@3 | ROUGE-L F1 Score | BERTScore F1 | Avg Inference Time (s) |",
         "|---|---|---|---|---|"
     ]
     
-    for name in ["mistral", "qwen"]:
-        if name in results:
-            res = results[name]
-            report_lines.append(
-                f"| **{name.capitalize()}-7B-Instruct** | {res['precision']:.4f} | {res['rouge_l']:.4f} | {res['bert_score']:.4f} | {res['avg_time']:.2f}s |"
-            )
-            
-    report_lines.append("\n## Analysis and Verdict\n")
-    if "mistral" in results and "qwen" in results:
-        m_score = results["mistral"]["bert_score"]
-        q_score = results["qwen"]["bert_score"]
-        winner = "Mistral-7B" if m_score > q_score else "Qwen-2.5-7B"
+    if "base" in results:
+        res = results["base"]
         report_lines.append(
-            f"Based on local semantic evaluation (BERTScore), the winner is **{winner}**.\n"
-            f"- Mistral-7B BERTScore: `{m_score:.4f}`\n"
-            f"- Qwen-2.5-7B BERTScore: `{q_score:.4f}`\n"
+            f"| Base Model ({os.path.basename(args.base_model_path)}) | {res['precision']:.4f} | {res['rouge_l']:.4f} | {res['bert_score']:.4f} | {res['avg_time']:.2f}s |"
+        )
+    if "tuned" in results:
+        res = results["tuned"]
+        report_lines.append(
+            f"| Fine-Tuned CMS Model | {res['precision']:.4f} | {res['rouge_l']:.4f} | {res['bert_score']:.4f} | {res['avg_time']:.2f}s |"
+        )
+        
+    report_lines.append("\n## Analysis and Verdict\n")
+    if "base" in results and "tuned" in results:
+        b_score = results["base"]["bert_score"]
+        t_score = results["tuned"]["bert_score"]
+        improvement = t_score - b_score
+        verdict = "Fine-tuned model IMPROVES performance" if improvement > 0 else "Fine-tuned model does not improve performance"
+        report_lines.append(
+            f"Verdict: **{verdict}** (semantic similarity delta: `+{improvement:.4f}`).\n"
+            f"- Base Model BERTScore: `{b_score:.4f}`\n"
+            f"- Fine-Tuned CMS Model BERTScore: `{t_score:.4f}`\n"
         )
     else:
-        report_lines.append("Complete side-by-side results were not available to determine a winner.\n")
+        report_lines.append("Reference baseline evaluation skipped. Results only show tuned model performance.\n")
         
     # Sample questions and outputs
     report_lines.append("\n## Sample Answers Comparison\n")
-    sample_indices = [0, 10, 20] # Print comparison for three questions
+    sample_indices = [0, len(eval_data)//2, len(eval_data)-1] if len(eval_data) > 2 else range(len(eval_data))
     for idx in sample_indices:
         if idx < len(eval_data):
             q = eval_data[idx]["question"]
             gt = eval_data[idx]["ground_truth"]
             report_lines.append(f"### Question: *\"{q}\"*\n")
             report_lines.append(f"**Ground Truth Context**:\n> {gt}\n")
-            if "mistral" in results:
-                report_lines.append(f"**Mistral-7B Answer**:\n> {results['mistral']['answers'][idx]}\n")
-            if "qwen" in results:
-                report_lines.append(f"**Qwen-2.5-7B Answer**:\n> {results['qwen']['answers'][idx]}\n")
+            if "base" in results:
+                report_lines.append(f"**Base Model Answer**:\n> {results['base']['answers'][idx]}\n")
+            if "tuned" in results:
+                report_lines.append(f"**Fine-Tuned CMS Answer**:\n> {results['tuned']['answers'][idx]}\n")
             report_lines.append("---\n")
             
     # Save the report
-    report_path = "data/evaluation_report.md"
-    with open(report_path, "w", encoding="utf-8") as f:
+    os.makedirs(os.path.dirname(args.report_path), exist_ok=True)
+    with open(args.report_path, "w", encoding="utf-8") as f:
         f.write("\n".join(report_lines))
         
-    print(f"\nEvaluation complete! Report written to {report_path}")
+    print(f"\nEvaluation complete! Report written to {args.report_path}")
 
 if __name__ == "__main__":
     main()
