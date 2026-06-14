@@ -1,6 +1,15 @@
 import os
-import re
 import sys
+
+# Ensure vLLM/Triton binaries like ninja can be found in the virtual environment's bin folder
+venv_bin = "/opt/pytorch/bin"
+if os.path.exists(venv_bin):
+    os.environ["PATH"] = venv_bin + os.path.pathsep + os.environ.get("PATH", "")
+
+# Disable FlashInfer JIT sampler which requires a full system CUDA toolkit installation matching headers
+os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
+
+import re
 import time
 import ast
 import torch
@@ -28,6 +37,7 @@ embed_model = None
 reranker = None
 tokenizer_dict = {}
 model_dict = {}
+llm_engine = None
 
 # System prompt for RAG answers (aligned with Phase 3 Training)
 SYSTEM_PROMPT = (
@@ -113,7 +123,7 @@ def retrieve_context_hybrid_rerank(query, top_k=3):
     return retrieved
 
 def initialize_models():
-    global db_data, faiss_index, embed_tokenizer, embed_model, reranker, tokenizer_dict, model_dict, DEMO_MODE
+    global db_data, faiss_index, embed_tokenizer, embed_model, reranker, tokenizer_dict, model_dict, llm_engine, DEMO_MODE
     
     db_file = "vector_db.pt"
     faiss_file = "vector_db.index"
@@ -135,15 +145,9 @@ def initialize_models():
     
     reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2", device=device)
     
-    # Define models to load
-    models_to_load = {
-        "qwen_14b_tuned": "./trained_models/qwen-14b-cms-qlora_merged",
-        "qwen_7b_tuned": "./trained_models/qwen-7b-cmg-qlora_merged",
-        "qwen_base_14b": "unsloth/qwen2.5-14b-instruct"
-    }
+    primary_model_path = os.path.abspath("./trained_models/qwen-14b-cms-qlora_merged")
     
     # Check if the primary local models folders actually exist. If not, auto-force DEMO_MODE
-    primary_model_path = models_to_load["qwen_14b_tuned"]
     if not os.path.exists(primary_model_path):
         print(f"Warning: Tuned model path '{primary_model_path}' not found. Auto-enabling Demo Mode.")
         DEMO_MODE = True
@@ -153,31 +157,26 @@ def initialize_models():
         print("Skipping VRAM-heavy reader LLM loads. Real FAISS + MS-Marco Cross-Encoder RAG is active on CPU.")
         return
         
-    # Configure bitsandbytes 4-bit quantization to load models concurrently in VRAM
-    print("Configuring 4-bit quantization for reader models...", flush=True)
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16,
-        bnb_4bit_use_double_quant=True
-    )
-    
-    for name, path in models_to_load.items():
-        if not os.path.exists(path) and not path.startswith("Qwen/"):
-            print(f"Warning: Model path '{path}' not found. Skipping loading '{name}'.")
-            continue
-        try:
-            print(f"Loading reader model '{name}' from '{path}'...", flush=True)
-            tokenizer_dict[name] = AutoTokenizer.from_pretrained(path)
-            model_dict[name] = AutoModelForCausalLM.from_pretrained(
-                path,
-                quantization_config=bnb_config,
-                device_map="auto"
-            )
-            model_dict[name].eval()
-            print(f"Loaded '{name}' reader model successfully!", flush=True)
-        except Exception as e:
-            print(f"Error loading model '{name}': {e}. Skipping.", flush=True)
+    # Configure and load vLLM engine for Qwen-14B CMS
+    from vllm import LLM
+    print("Configuring and loading vLLM engine for Qwen-14B CMS...", flush=True)
+    try:
+        # Load tokenizer for chat template parsing
+        tokenizer_dict["qwen_14b_tuned"] = AutoTokenizer.from_pretrained(primary_model_path)
+        
+        # Load model using vLLM in 4-bit quantization
+        llm_engine = LLM(
+            model=primary_model_path,
+            quantization="bitsandbytes",
+            gpu_memory_utilization=0.85,
+            max_model_len=4096
+        )
+        # Populate model_dict to keep API checks and metrics working properly
+        model_dict["qwen_14b_tuned"] = True
+        print("vLLM engine loaded successfully!", flush=True)
+    except Exception as e:
+        print(f"Error loading vLLM engine: {e}", flush=True)
+        raise e
 
 API_KEY = os.environ.get("API_KEY", "dwp-cmg-sec-key-7d9a1f8c")
 
@@ -297,8 +296,6 @@ def handle_generate():
         
     try:
         tok = tokenizer_dict[model_name]
-        mod = model_dict[model_name]
-        device = "cuda" if torch.cuda.is_available() else "cpu"
         
         # Build chat message templates
         chat_messages = []
@@ -330,21 +327,20 @@ def handle_generate():
             add_generation_prompt=True
         )
         
+        # Configure vLLM generation parameters
+        from vllm import SamplingParams
+        sampling_params = SamplingParams(
+            temperature=0.3,
+            top_p=0.9,
+            max_tokens=512,
+            repetition_penalty=1.2,
+            stop_token_ids=[tok.eos_token_id]
+        )
+        
         t_start = time.time()
-        inputs = tok(prompt, return_tensors="pt").to(device)
-        with torch.no_grad():
-            outputs = mod.generate(
-                **inputs,
-                max_new_tokens=512,
-                temperature=0.3,
-                top_p=0.9,
-                repetition_penalty=1.2,
-                do_sample=True,
-                pad_token_id=tok.eos_token_id
-            )
-        input_len = inputs["input_ids"].shape[-1]
-        generated_tokens = outputs[0][input_len:]
-        response = tok.decode(generated_tokens, skip_special_tokens=True).strip()
+        # Generate answer using vLLM engine
+        outputs = llm_engine.generate([prompt], sampling_params, use_tqdm=False)
+        response = outputs[0].outputs[0].text.strip()
         elapsed_time = time.time() - t_start
         
         return jsonify({
@@ -434,13 +430,13 @@ def handle_metrics():
         "models_loaded": list(model_dict.keys())
     })
 
-print("Starting Flask application. Initializing models...", flush=True)
-try:
-    initialize_models()
-    print("Models/DB initialization completed.", flush=True)
-except Exception as e:
-    print(f"Failed to initialize models: {e}", flush=True)
-
 if __name__ == "__main__":
+    print("Starting Flask application. Initializing models...", flush=True)
+    try:
+        initialize_models()
+        print("Models/DB initialization completed.", flush=True)
+    except Exception as e:
+        print(f"Failed to initialize models: {e}", flush=True)
+        
     print(f"Web server running on http://127.0.0.1:5000 (DEMO_MODE={DEMO_MODE})", flush=True)
     app.run(host="127.0.0.1", port=5000, debug=False)
