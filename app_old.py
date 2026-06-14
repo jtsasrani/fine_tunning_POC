@@ -1,23 +1,18 @@
 import os
 import re
-import sys
 import time
-import ast
 import torch
 from flask import Flask, request, jsonify, render_template
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoModel, BitsAndBytesConfig
 import faiss
 from sentence_transformers import CrossEncoder
+from concurrent.futures import ThreadPoolExecutor
 
 app = Flask(__name__)
 
-# Ensure HuggingFace models can download if not in cache
+# Ensure HuggingFace models can download if not in cache (e.g. cross-encoder, base model)
 os.environ["HF_HUB_OFFLINE"] = "0"
 os.environ["TRANSFORMERS_OFFLINE"] = "0"
-
-# Detect Demo/Mock Mode at import time to preserve GPU resources
-# Runs on CPU-only for reader models if --demo flag is present or environment variable set
-DEMO_MODE = "--demo" in sys.argv or os.environ.get("DEMO_MODE", "0") == "1"
 
 # Global references for models & database
 db_data = None
@@ -28,12 +23,13 @@ reranker = None
 tokenizer_dict = {}
 model_dict = {}
 
-# System prompt for RAG answers (aligned with Phase 3 Training)
+# System prompt for RAG answers
 SYSTEM_PROMPT = (
-    "You are an expert Decision Maker assistant for the DWP Child Maintenance Service (CMS). "
-    "Answer questions accurately using only the provided policy context. "
-    "Cite specific paragraph numbers, rules, and sections where present. "
-    "If the context does not contain sufficient information, state this clearly."
+    "You are an expert Decision Maker helper for the DWP CMS. Answer the user's question "
+    "accurately and professionally using ONLY the provided official policy contexts. "
+    "State exact rules, percentages, and paragraph numbers if they are present in the context. "
+    "If the context does not contain the information needed to answer the question, state clearly "
+    "that the policy manual does not provide sufficient details. Do not assume or extrapolate."
 )
 
 def mean_pooling(model_output, attention_mask):
@@ -112,7 +108,7 @@ def retrieve_context_hybrid_rerank(query, top_k=3):
     return retrieved
 
 def initialize_models():
-    global db_data, faiss_index, embed_tokenizer, embed_model, reranker, tokenizer_dict, model_dict, DEMO_MODE
+    global db_data, faiss_index, embed_tokenizer, embed_model, reranker, tokenizer_dict, model_dict
     
     db_file = "vector_db.pt"
     faiss_file = "vector_db.index"
@@ -134,24 +130,6 @@ def initialize_models():
     
     reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2", device=device)
     
-    # Define models to load
-    models_to_load = {
-        "qwen_14b_tuned": "./trained_models/qwen-14b-cms-qlora_merged",
-        "qwen_7b_tuned": "./trained_models/qwen-7b-cmg-qlora_merged",
-        "qwen_base_14b": "Qwen/Qwen2.5-14B-Instruct"
-    }
-    
-    # Check if the primary local models folders actually exist. If not, auto-force DEMO_MODE
-    primary_model_path = models_to_load["qwen_14b_tuned"]
-    if not os.path.exists(primary_model_path):
-        print(f"Warning: Tuned model path '{primary_model_path}' not found. Auto-enabling Demo Mode.")
-        DEMO_MODE = True
-        
-    if DEMO_MODE:
-        print("=== RUNNING IN DEMO MODE ===")
-        print("Skipping VRAM-heavy reader LLM loads. Real FAISS + MS-Marco Cross-Encoder RAG is active on CPU.")
-        return
-        
     # Configure bitsandbytes 4-bit quantization to load models concurrently in VRAM
     print("Configuring 4-bit quantization for reader models...", flush=True)
     bnb_config = BitsAndBytesConfig(
@@ -161,27 +139,29 @@ def initialize_models():
         bnb_4bit_use_double_quant=True
     )
     
+    models_to_load = {
+        "mistral_tuned": "./trained_models/mistral-7b-cmg-qlora_merged",
+        "qwen_tuned": "./trained_models/qwen-7b-cmg-qlora_merged",
+        "mistral_base": "mistralai/Mistral-7B-Instruct-v0.3"
+    }
+    
     for name, path in models_to_load.items():
-        if not os.path.exists(path) and not path.startswith("Qwen/"):
-            print(f"Warning: Model path '{path}' not found. Skipping loading '{name}'.")
-            continue
-        try:
-            print(f"Loading reader model '{name}' from '{path}'...", flush=True)
-            tokenizer_dict[name] = AutoTokenizer.from_pretrained(path)
-            model_dict[name] = AutoModelForCausalLM.from_pretrained(
-                path,
-                quantization_config=bnb_config,
-                device_map="auto"
-            )
-            model_dict[name].eval()
-            print(f"Loaded '{name}' reader model successfully!", flush=True)
-        except Exception as e:
-            print(f"Error loading model '{name}': {e}. Skipping.", flush=True)
+        print(f"Loading reader model '{name}' from '{path}'...", flush=True)
+        tokenizer_dict[name] = AutoTokenizer.from_pretrained(path)
+        model_dict[name] = AutoModelForCausalLM.from_pretrained(
+            path,
+            quantization_config=bnb_config,
+            device_map="auto"
+        )
+        model_dict[name].eval()
+        print(f"Loaded '{name}' reader model successfully!", flush=True)
 
 API_KEY = os.environ.get("API_KEY", "dwp-cmg-sec-key-7d9a1f8c")
 
 def check_auth():
     provided_key = request.headers.get("X-API-Key") or request.args.get("api_key")
+    
+    # Check JSON body fallback (useful if CloudFront/proxy strips custom headers)
     if not provided_key and request.is_json:
         try:
             body = request.get_json(silent=True) or {}
@@ -240,90 +220,47 @@ def handle_generate():
         return auth_err
         
     data = request.get_json() or {}
-    messages = data.get("messages", [])
     query = data.get("query", "").strip()
     model_name = data.get("model", "").strip()
     contexts = data.get("contexts", [])
     use_rag = data.get("use_rag", True)
     
-    # Fallback if messages list is empty
-    if not query and messages:
-        # Last message content is the query
-        query = messages[-1].get("content", "").strip()
-        
     if not query or not model_name:
-        return jsonify({"error": "Query/messages and model name are required."}), 400
+        return jsonify({"error": "Query and model name are required."}), 400
         
-    # Check if we should simulate generation (if in DEMO_MODE or if the model isn't loaded)
-    if DEMO_MODE or model_name not in model_dict:
-        t0 = time.time()
-        # Sleep slightly to simulate model generation speed
-        time.sleep(1.2)
-        elapsed_time = time.time() - t0
-        
-        best_chunk = contexts[0] if contexts else None
-        if best_chunk:
-            text = best_chunk.get("text", "")
-            doc = best_chunk.get("source_doc", "")
-            pid = best_chunk.get("paragraph_id", "")
-            
-            # Simple heuristic mock: extract first 3 sentences
-            sentences = re.split(r'(?<=[.!?])\s+', text)
-            summary = " ".join(sentences[:3])
-            
-            response = (
-                f"**[Demo Mode — Qwen-14B CMS Response Simulation]**\n\n"
-                f"Based on the official policy guide **{doc}** (Paragraph {pid}), the guidance states:\n\n"
-                f"> {summary}...\n\n"
-                f"**Retrieval Reference**:\n"
-                f"- Document: `{doc}`\n"
-                f"- Paragraph: `{pid}`\n"
-                f"- FAISS Rerank Score: `{best_chunk.get('score', 'N/A')}`\n\n"
-                f"*Note: The Qwen-14B CMS model is currently training in the background. The RAG vector retrieval is live and querying your real PDF database, but the answer generation is simulated to keep the GPU 100% free.*"
-            )
-        else:
-            response = (
-                f"**[Demo Mode — Qwen-14B CMS Response Simulation]**\n\n"
-                f"No relevant policy context was found in the database to answer the question: *\"{query}\"*\n\n"
-                f"*Note: The Qwen-14B CMS model is currently training in the background. The response generation is simulated to keep the GPU 100% free.*"
-            )
-            
-        return jsonify({
-            "model": model_name,
-            "response": response,
-            "time": round(elapsed_time, 2)
-        })
+    if model_name not in model_dict:
+        return jsonify({"error": f"Model '{model_name}' is not loaded."}), 400
         
     try:
         tok = tokenizer_dict[model_name]
         mod = model_dict[model_name]
         device = "cuda" if torch.cuda.is_available() else "cpu"
         
-        # Build chat message templates
-        chat_messages = []
-        chat_messages.append({"role": "system", "content": SYSTEM_PROMPT})
-        
-        # Append message history (excluding the very last user query, which we append with RAG contexts)
-        for msg in messages[:-1]:
-            chat_messages.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
-            
         if use_rag:
+            # Format contexts into a single string
             context_parts = []
             for ctx in contexts:
                 pid = ctx.get('paragraph_id', '')
                 doc = ctx.get('source_doc', '')
                 text = ctx.get('text', '')
-                context_parts.append(f"Paragraph {pid} (from {doc}):\n{text}")
+                if pid.startswith("L_"):
+                    context_parts.append(f"Context from {doc}:\n{text}")
+                else:
+                    context_parts.append(f"Paragraph {pid} (from {doc}):\n{text}")
             context_str = "\n\n".join(context_parts)
             
             user_content = f"Contexts:\n{context_str}\n\nQuestion: {query}"
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_content}
+            ]
         else:
-            user_content = query
+            messages = [
+                {"role": "user", "content": query}
+            ]
             
-        chat_messages.append({"role": "user", "content": user_content})
-        
         prompt = tok.apply_chat_template(
-            chat_messages,
+            messages,
             tokenize=False,
             add_generation_prompt=True
         )
@@ -355,85 +292,14 @@ def handle_generate():
         print(f"Error in generate for {model_name}: {e}", flush=True)
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/metrics", methods=["GET"])
-def handle_metrics():
-    log_path = "data/pipeline_step6_training.log"
-    train_history = []
-    eval_history = []
-    summary = {
-        "total_steps": 2406,
-        "completed_steps": 0,
-        "progress_pct": 0.0,
-        "initial_loss": 0.0,
-        "final_loss": 0.0,
-        "final_eval_loss": 0.0,
-        "status": "idle"
-    }
-    
-    if os.path.exists(log_path):
-        summary["status"] = "running"
-        dict_pattern = re.compile(r"\{'[a-z_]+':\s*.*\}")
-        try:
-            with open(log_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    match = dict_pattern.search(line)
-                    if match:
-                        try:
-                            data = ast.literal_eval(match.group(0))
-                            if 'loss' in data:
-                                train_history.append({
-                                    'step': len(train_history) * 10 + 10,
-                                    'loss': float(data['loss']),
-                                    'epoch': float(data['epoch']),
-                                    'lr': float(data['learning_rate'])
-                                })
-                            elif 'eval_loss' in data:
-                                epoch = float(data['epoch'])
-                                step = round(epoch * (2406 / 3.0))
-                                eval_history.append({
-                                    'step': step,
-                                    'eval_loss': float(data['eval_loss']),
-                                    'epoch': epoch
-                                })
-                        except Exception:
-                            pass
-        except Exception as e:
-            print(f"Error parsing logs: {e}")
-            
-    if train_history:
-        summary["completed_steps"] = train_history[-1]['step']
-        summary["progress_pct"] = round((summary["completed_steps"] / summary["total_steps"]) * 100, 1)
-        summary["initial_loss"] = train_history[0]['loss']
-        summary["final_loss"] = train_history[-1]['loss']
-        
-    if eval_history:
-        summary["final_eval_loss"] = eval_history[-1]['eval_loss']
-        
-    orchestrator_log = "data/orchestrator.log"
-    if os.path.exists(orchestrator_log):
-        try:
-            with open(orchestrator_log, 'r', encoding='utf-8') as f:
-                content = f.read()
-                if "End-to-End Pipeline Completed Successfully" in content:
-                    summary["status"] = "completed"
-                elif "Error:" in content or "failed" in content:
-                    summary["status"] = "failed"
-        except Exception:
-            pass
-            
-    return jsonify({
-        "train_history": train_history,
-        "eval_history": eval_history,
-        "summary": summary
-    })
-
-print("Starting Flask application. Initializing models...", flush=True)
+print("Starting Flask application. Preloading GPU models in 4-bit...", flush=True)
 try:
     initialize_models()
-    print("Models/DB initialization completed.", flush=True)
+    print("All models loaded successfully on GPU.", flush=True)
 except Exception as e:
     print(f"Failed to initialize models: {e}", flush=True)
 
 if __name__ == "__main__":
-    print(f"Web server running on http://127.0.0.1:5000 (DEMO_MODE={DEMO_MODE})", flush=True)
+    print("Web server running on http://127.0.0.1:5000", flush=True)
     app.run(host="127.0.0.1", port=5000, debug=False)
+

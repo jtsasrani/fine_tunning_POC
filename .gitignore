@@ -7,4 +7,5 @@ vector_db.pt
 *.pdf
 .DS_Store
 *.pem
+*.zip
 

@@ -1,11 +1,12 @@
 import os
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 import json
 import argparse
 import torch
 from datasets import load_dataset
 from unsloth import FastLanguageModel
 from trl import SFTTrainer
-from transformers import TrainingArguments, EarlyStoppingCallback
+from transformers import TrainingArguments
 
 def train(args):
     print(f"=== Starting QLoRA training for {args.model_name} ===")
@@ -88,7 +89,6 @@ def train(args):
         max_seq_length=args.max_seq_length,
         dataset_num_proc=2,
         packing=False, # Set to False for instruction tuning to keep sequences separate
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
         args=TrainingArguments(
             output_dir=args.output_dir + "_checkpoints",
             per_device_train_batch_size=args.batch_size,
@@ -105,10 +105,8 @@ def train(args):
             seed=42,
             eval_strategy="steps",
             eval_steps=100,
-            save_strategy="steps",
-            save_steps=200,
-            save_total_limit=2,
-            load_best_model_at_end=True,
+            save_strategy="no",
+            load_best_model_at_end=False,
             report_to="none" # Disable external logging for simplicity
         ),
     )
@@ -140,8 +138,8 @@ if __name__ == "__main__":
     parser.add_argument("--max_seq_length", type=int, default=2048, help="Max sequence length")
     parser.add_argument("--lora_r", type=int, default=32, help="LoRA rank")
     parser.add_argument("--lora_alpha", type=int, default=64, help="LoRA alpha")
-    parser.add_argument("--batch_size", type=int, default=2, help="Batch size per device")
-    parser.add_argument("--grad_accum", type=int, default=8, help="Gradient accumulation steps")
+    parser.add_argument("--batch_size", type=int, default=1, help="Batch size per device")
+    parser.add_argument("--grad_accum", type=int, default=16, help="Gradient accumulation steps")
     parser.add_argument("--epochs", type=int, default=3, help="Number of epochs")
     parser.add_argument("--learning_rate", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--save_merged", type=bool, default=True, help="Save merged 16bit model")
