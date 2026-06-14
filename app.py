@@ -10,6 +10,7 @@ import faiss
 from sentence_transformers import CrossEncoder
 
 app = Flask(__name__)
+app.config["TEMPLATES_AUTO_RELOAD"] = True
 
 # Ensure HuggingFace models can download if not in cache
 os.environ["HF_HUB_OFFLINE"] = "0"
