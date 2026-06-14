@@ -151,7 +151,7 @@ document.addEventListener("DOMContentLoaded", () => {
     });
 
     // Render Message bubble
-    const appendMessage = (role, content) => {
+    const appendMessage = (role, content, responseTime = null) => {
         // Remove welcome screen if present
         if (welcomeScreen) welcomeScreen.style.display = "none";
         
@@ -172,7 +172,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         const timeElem = document.createElement("span");
         timeElem.classList.add("message-time");
-        timeElem.textContent = timeStr;
+        timeElem.textContent = responseTime ? `${timeStr} • took ${responseTime}s` : timeStr;
         
         container.appendChild(messageBody);
         container.appendChild(timeElem);
@@ -270,7 +270,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 const generateResult = await generateResponse.json();
                 const aiAnswer = generateResult.response || "No response received.";
                 
-                appendMessage("assistant", aiAnswer);
+                appendMessage("assistant", aiAnswer, generateResult.time);
                 conversationMessages.push({ role: "assistant", content: aiAnswer });
             } else {
                 const err = await generateResponse.json();
