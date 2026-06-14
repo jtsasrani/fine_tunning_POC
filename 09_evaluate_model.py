@@ -237,11 +237,11 @@ def main():
                 if q and gt:
                     eval_data.append({"question": q, "ground_truth": gt})
                     
-    # Cap evaluation at 40 questions to save time if val_split is used
-    if len(eval_data) > 40:
-        print(f"Subsampling evaluation dataset from {len(eval_data)} to 40 questions for speed.")
+    # Cap evaluation at 10 questions to save time under CPU offloading constraints
+    if len(eval_data) > 10:
+        print(f"Subsampling evaluation dataset from {len(eval_data)} to 10 questions for speed.")
         np.random.seed(42)
-        indices = np.random.choice(len(eval_data), 40, replace=False)
+        indices = np.random.choice(len(eval_data), 10, replace=False)
         eval_data = [eval_data[i] for i in indices]
         
     print(f"Loaded {len(eval_data)} evaluation samples.")

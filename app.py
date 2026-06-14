@@ -138,7 +138,7 @@ def initialize_models():
     models_to_load = {
         "qwen_14b_tuned": "./trained_models/qwen-14b-cms-qlora_merged",
         "qwen_7b_tuned": "./trained_models/qwen-7b-cmg-qlora_merged",
-        "qwen_base_14b": "Qwen/Qwen2.5-14B-Instruct"
+        "qwen_base_14b": "unsloth/qwen2.5-14b-instruct"
     }
     
     # Check if the primary local models folders actually exist. If not, auto-force DEMO_MODE
@@ -304,7 +304,8 @@ def handle_generate():
         chat_messages.append({"role": "system", "content": SYSTEM_PROMPT})
         
         # Append message history (excluding the very last user query, which we append with RAG contexts)
-        for msg in messages[:-1]:
+        # Limit history to the last 10 messages (5 turns) to prevent context limit overflow and VRAM issues
+        for msg in messages[:-1][-10:]:
             chat_messages.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
             
         if use_rag:
@@ -313,7 +314,7 @@ def handle_generate():
                 pid = ctx.get('paragraph_id', '')
                 doc = ctx.get('source_doc', '')
                 text = ctx.get('text', '')
-                context_parts.append(f"Paragraph {pid} (from {doc}):\n{text}")
+                context_parts.append(f"Document: {doc}\nContent:\n{text}")
             context_str = "\n\n".join(context_parts)
             
             user_content = f"Contexts:\n{context_str}\n\nQuestion: {query}"
@@ -393,7 +394,8 @@ def handle_metrics():
                                 eval_history.append({
                                     'step': step,
                                     'eval_loss': float(data['eval_loss']),
-                                    'epoch': epoch
+                                    'epoch': epoch,
+                                    'eval_runtime': float(data.get('eval_runtime', 0.0))
                                 })
                         except Exception:
                             pass
@@ -416,6 +418,8 @@ def handle_metrics():
                 content = f.read()
                 if "End-to-End Pipeline Completed Successfully" in content:
                     summary["status"] = "completed"
+                elif "Fine-tuning completed successfully" in content:
+                    summary["status"] = "completed"
                 elif "Error:" in content or "failed" in content:
                     summary["status"] = "failed"
         except Exception:
@@ -424,7 +428,9 @@ def handle_metrics():
     return jsonify({
         "train_history": train_history,
         "eval_history": eval_history,
-        "summary": summary
+        "summary": summary,
+        "demo_mode": DEMO_MODE,
+        "models_loaded": list(model_dict.keys())
     })
 
 print("Starting Flask application. Initializing models...", flush=True)

@@ -126,9 +126,7 @@
                                 <div class="control-item">
                                     <label for="model-select">Reader LLM Model:</label>
                                     <select id="model-select">
-                                        <option value="qwen_14b_tuned">(Recommended) Qwen-14B CMS QLoRA Tuned</option>
-                                        <option value="qwen_base_14b">Qwen-2.5-14B-Instruct Base Model</option>
-                                        <option value="qwen_tuned_7b">Qwen-7B CMG Legacy Tuned</option>
+                                        <option value="qwen_14b_tuned">Qwen-14B CMS QLoRA Tuned (Active)</option>
                                     </select>
                                 </div>
                                 <div class="control-item toggles">
@@ -137,6 +135,11 @@
                                         <span class="slider round"></span>
                                     </label>
                                     <span class="toggle-label">Enable Hybrid RAG Search</span>
+                                </div>
+                                <div class="control-item">
+                                    <button type="button" id="new-chat-btn" class="new-chat-btn">
+                                        <i class="fa-solid fa-arrows-rotate"></i> Reset Chat
+                                    </button>
                                 </div>
                             </div>
                         </div>
@@ -191,6 +194,20 @@
                                 <p>Validation Loss</p>
                             </div>
                         </div>
+                        <div class="kpi-card">
+                            <div class="kpi-icon"><i class="fa-solid fa-gauge-high"></i></div>
+                            <div class="kpi-info">
+                                <h3>0.5315</h3>
+                                <p>ROUGE-L Score</p>
+                            </div>
+                        </div>
+                        <div class="kpi-card">
+                            <div class="kpi-icon"><i class="fa-solid fa-award"></i></div>
+                            <div class="kpi-info">
+                                <h3>0.9179</h3>
+                                <p>BERTScore (Semantic)</p>
+                            </div>
+                        </div>
                     </div>
 
                     <!-- Row 2: Charts and Training Info -->
@@ -243,8 +260,8 @@
                                         <tr>
                                             <th>Step</th>
                                             <th>Epoch</th>
+                                            <th>Training Loss</th>
                                             <th>Validation Loss</th>
-                                            <th>Throughput</th>
                                         </tr>
                                     </thead>
                                     <tbody>

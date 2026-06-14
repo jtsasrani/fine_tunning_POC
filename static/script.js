@@ -110,6 +110,31 @@ document.addEventListener("DOMContentLoaded", () => {
         citationSidebar.classList.add("closed");
     });
 
+    // Reset Chat Button Handler
+    const resetChatBtn = document.getElementById("new-chat-btn");
+    if (resetChatBtn) {
+        resetChatBtn.addEventListener("click", () => {
+            conversationMessages = [];
+            // Remove message bubbles
+            const bubbles = chatBox.querySelectorAll(".message-bubble");
+            bubbles.forEach(b => b.remove());
+            // Restore welcome screen
+            if (welcomeScreen) welcomeScreen.style.display = "block";
+            // Clear citations
+            citationsContainer.innerHTML = `
+                <div class="no-citations">
+                    <i class="fa-solid fa-magnifying-glass-chart"></i>
+                    <p>Context citations will appear here once you send a query in RAG mode.</p>
+                </div>
+            `;
+            // Close citations sidebar
+            if (citationSidebar) citationSidebar.classList.add("closed");
+            
+            chatInput.value = "";
+            chatInput.style.height = "auto";
+        });
+    }
+
     // Textarea Auto-expand
     chatInput.addEventListener("input", function() {
         this.style.height = "auto";
@@ -282,7 +307,7 @@ document.addEventListener("DOMContentLoaded", () => {
                     <span class="score-badge">Rerank: ${c.score}</span>
                 </div>
                 <div class="citation-text">
-                    <strong>Par ${c.paragraph_id}</strong>: ${c.text.substring(0, 200)}...
+                    <strong>Ref #${c.paragraph_id.split('_').pop()}</strong>: ${c.text.substring(0, 200)}...
                 </div>
             `;
             citationsContainer.appendChild(card);
@@ -320,12 +345,12 @@ document.addEventListener("DOMContentLoaded", () => {
             valLossVal.textContent = summary.final_eval_loss ? summary.final_eval_loss.toFixed(4) : "--";
             
             // Status Indicator update
-            if (summary.status === "running") {
+            if (summary.status === "running" && summary.completed_steps < 2400) {
                 trainingBadge.textContent = "Active Running";
                 trainingBadge.className = "badge pulse";
                 document.getElementById("sys-indicator").className = "status-indicator online";
                 pipelineText.textContent = "Training Fine-Tuning";
-            } else if (summary.status === "completed") {
+            } else if (summary.status === "completed" || summary.completed_steps >= 2400) {
                 trainingBadge.textContent = "Completed";
                 trainingBadge.className = "badge";
                 document.getElementById("sys-indicator").className = "status-indicator online";
@@ -350,12 +375,14 @@ document.addEventListener("DOMContentLoaded", () => {
                 // Render list in reverse order (newest first)
                 [...evalHistory].reverse().forEach(ev => {
                     const row = document.createElement("tr");
-                    const samplesSec = 1426 / ev.eval_runtime;
+                    // Find corresponding training loss at this step
+                    const trainLossItem = trainHistory.find(t => t.step === ev.step) || trainHistory.find(t => Math.abs(t.step - ev.step) <= 10);
+                    const trainLossText = trainLossItem ? trainLossItem.loss.toFixed(4) : "N/A";
                     row.innerHTML = `
                         <td><strong>Step ${ev.step}</strong></td>
                         <td>Epoch ${ev.epoch.toFixed(4)}</td>
+                        <td><span class="highlight-purple">${trainLossText}</span></td>
                         <td><span class="highlight-green">${ev.eval_loss.toFixed(4)}</span></td>
-                        <td>${samplesSec.toFixed(2)} samples/sec (${ev.eval_runtime.toFixed(1)}s)</td>
                     `;
                     validationTableBody.appendChild(row);
                 });
@@ -517,7 +544,7 @@ document.addEventListener("DOMContentLoaded", () => {
                     card.innerHTML = `
                         <div class="explorer-passage-meta">
                             <span class="explorer-source-badge">${c.source_doc}</span>
-                            <span class="explorer-score-tag">Rerank: ${c.score} (Par ${c.paragraph_id})</span>
+                            <span class="explorer-score-tag">Rerank: ${c.score} (Ref #${c.paragraph_id.split('_').pop()})</span>
                         </div>
                         <div class="explorer-passage-text">
                             ${c.text}
@@ -555,19 +582,19 @@ document.addEventListener("DOMContentLoaded", () => {
                 const data = await response.json();
                 const summary = data.summary || {};
                 
-                // Determine model availability and mode
-                const has14bTuned = summary.status === "completed";
+                // Determine model availability and mode based on actual backend operational state
+                const has14bTuned = !data.demo_mode && data.models_loaded && data.models_loaded.includes("qwen_14b_tuned");
                 modeText.textContent = has14bTuned ? "Inference Active (14B)" : "Demo Mode (Inference Simulated)";
                 modeText.style.color = has14bTuned ? "#34d399" : "#c084fc";
                 
                 progressText.textContent = `${summary.completed_steps || 0}/${summary.total_steps || 2406}`;
                 
-                if (summary.status === "running") {
-                    pipelineText.textContent = "Fine-Tuning Active";
-                    pipelineText.style.color = "#a78bfa";
-                } else if (summary.status === "completed") {
+                if (summary.status === "completed" || summary.completed_steps >= 2400) {
                     pipelineText.textContent = "Pipeline Complete";
                     pipelineText.style.color = "#34d399";
+                } else if (summary.status === "running") {
+                    pipelineText.textContent = "Fine-Tuning Active";
+                    pipelineText.style.color = "#a78bfa";
                 } else if (summary.status === "failed") {
                     pipelineText.textContent = "Pipeline Failed";
                     pipelineText.style.color = "#f43f5e";
