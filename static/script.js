@@ -360,8 +360,9 @@ document.addEventListener("DOMContentLoaded", () => {
                 trainingBadge.className = "badge";
                 pipelineText.textContent = "Idle / Idle";
             }
-            
-            progressText.textContent = `${summary.completed_steps || 0}/${summary.total_steps || 2406}`;
+            if (progressText) {
+                progressText.textContent = `${summary.completed_steps || 0}/${summary.total_steps || 2406}`;
+            }
             
             // 2. Render Checkpoint Table
             if (evalHistory.length === 0) {
@@ -586,8 +587,9 @@ document.addEventListener("DOMContentLoaded", () => {
                 const has14bTuned = !data.demo_mode && data.models_loaded && data.models_loaded.includes("qwen_14b_tuned");
                 modeText.textContent = has14bTuned ? "Inference Active (14B)" : "Demo Mode (Inference Simulated)";
                 modeText.style.color = has14bTuned ? "#34d399" : "#c084fc";
-                
-                progressText.textContent = `${summary.completed_steps || 0}/${summary.total_steps || 2406}`;
+                if (progressText) {
+                    progressText.textContent = `${summary.completed_steps || 0}/${summary.total_steps || 2406}`;
+                }
                 
                 if (summary.status === "completed" || summary.completed_steps >= 2400) {
                     pipelineText.textContent = "Pipeline Complete";
