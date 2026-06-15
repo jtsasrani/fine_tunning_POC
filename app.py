@@ -438,5 +438,5 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Failed to initialize models: {e}", flush=True)
         
-    print(f"Web server running on http://127.0.0.1:5000 (DEMO_MODE={DEMO_MODE})", flush=True)
-    app.run(host="127.0.0.1", port=5000, debug=False)
+    print(f"Web server running on http://0.0.0.0:5000 (DEMO_MODE={DEMO_MODE})", flush=True)
+    app.run(host="0.0.0.0", port=5000, debug=False)
