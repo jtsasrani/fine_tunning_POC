@@ -1257,3 +1257,77 @@ tr:hover td {
     color: var(--text-secondary);
     line-height: 1.5;
 }
+
+/* Citations info message at the top of sidebar */
+.citations-info {
+    font-size: 11px;
+    color: var(--text-muted);
+    background-color: rgba(239, 68, 68, 0.05);
+    border: 1px dashed rgba(239, 68, 68, 0.2);
+    border-radius: 8px;
+    padding: 10px;
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    line-height: 1.4;
+    margin-bottom: 8px;
+}
+.citations-info i {
+    color: #ef4444;
+    font-size: 13px;
+    margin-top: 2px;
+    flex-shrink: 0;
+}
+.citations-info p {
+    margin: 0;
+}
+
+/* Excluded citation styling */
+.citation-card.excluded {
+    opacity: 0.6;
+    border-style: dashed;
+    border-color: rgba(239, 68, 68, 0.3);
+    background-color: rgba(239, 68, 68, 0.02);
+}
+.citation-card.excluded:hover {
+    border-color: rgba(239, 68, 68, 0.6);
+}
+.score-badge.excluded {
+    color: #ef4444;
+    font-weight: 600;
+}
+
+/* Excluded explorer passage styling */
+.explorer-passage-card.excluded {
+    opacity: 0.6;
+    border-style: dashed;
+    border-color: rgba(239, 68, 68, 0.3);
+    background-color: rgba(239, 68, 68, 0.02);
+}
+.explorer-score-tag.excluded {
+    color: #ef4444 !important;
+    font-weight: 600;
+}
+
+/* Clickable policy source badges */
+.source-badge.clickable-source, 
+.explorer-source-badge.clickable-source {
+    cursor: pointer;
+    text-decoration: none;
+    transition: all 0.2s ease-in-out;
+    display: inline-block;
+}
+
+.source-badge.clickable-source:hover {
+    background-color: rgba(6, 182, 212, 0.2);
+    border-color: rgba(6, 182, 212, 0.4);
+    box-shadow: 0 0 6px rgba(6, 182, 212, 0.25);
+    filter: brightness(1.1);
+}
+
+.explorer-source-badge.clickable-source:hover {
+    background-color: rgba(139, 92, 246, 0.2);
+    border-color: rgba(139, 92, 246, 0.4);
+    box-shadow: 0 0 6px rgba(139, 92, 246, 0.25);
+    filter: brightness(1.1);
+}

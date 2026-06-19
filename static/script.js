@@ -296,15 +296,30 @@ document.addEventListener("DOMContentLoaded", () => {
             return;
         }
         
-        citationsContainer.innerHTML = "";
+        // Add a small info box at the top explaining the filtering logic
+        citationsContainer.innerHTML = `
+            <div class="citations-info">
+                <i class="fa-solid fa-circle-info"></i>
+                <p>Passages with a Rerank score &lt; -1.0 are kept here for inspection but are excluded from the AI reader context to prevent hallucination.</p>
+            </div>
+        `;
+        
         contexts.forEach((c) => {
             const card = document.createElement("div");
             card.classList.add("citation-card");
             
+            const isExcluded = c.score < -1.0;
+            if (isExcluded) {
+                card.classList.add("excluded");
+            }
+            
+            const scoreText = isExcluded ? `Rerank: ${c.score} (Excluded)` : `Rerank: ${c.score}`;
+            const badgeClass = isExcluded ? "score-badge excluded" : "score-badge";
+            
             card.innerHTML = `
                 <div class="citation-source">
-                    <span class="source-badge">${c.source_doc}</span>
-                    <span class="score-badge">Rerank: ${c.score}</span>
+                    <a href="/api/documents/${encodeURIComponent(c.source_doc)}?api_key=${encodeURIComponent(getApiKey())}" target="_blank" class="source-badge clickable-source" title="Open ${c.source_doc} in a new tab">${c.source_doc}</a>
+                    <span class="${badgeClass}">${scoreText}</span>
                 </div>
                 <div class="citation-text">
                     <strong>Ref #${c.paragraph_id.split('_').pop()}</strong>: ${c.text.substring(0, 200)}...
@@ -536,16 +551,30 @@ document.addEventListener("DOMContentLoaded", () => {
                 }
                 
                 explorerScoreVal.textContent = contexts[0].score.toFixed(4);
-                passagesContainer.innerHTML = "";
+                
+                // Add informational banner about RAG filtering
+                passagesContainer.innerHTML = `
+                    <div class="citations-info">
+                        <i class="fa-solid fa-circle-info"></i>
+                        <p>Passages with a Rerank score &lt; -1.0 are shown here for exploration, but are automatically excluded from the AI reader context to prevent hallucinations.</p>
+                    </div>
+                `;
                 
                 contexts.forEach((c) => {
                     const card = document.createElement("div");
                     card.classList.add("explorer-passage-card");
                     
+                    const isExcluded = c.score < -1.0;
+                    if (isExcluded) {
+                        card.classList.add("excluded");
+                    }
+                    
+                    const rerankText = isExcluded ? `Rerank: ${c.score} (Excluded)` : `Rerank: ${c.score}`;
+                    
                     card.innerHTML = `
                         <div class="explorer-passage-meta">
-                            <span class="explorer-source-badge">${c.source_doc}</span>
-                            <span class="explorer-score-tag">Rerank: ${c.score} (Ref #${c.paragraph_id.split('_').pop()})</span>
+                            <a href="/api/documents/${encodeURIComponent(c.source_doc)}?api_key=${encodeURIComponent(getApiKey())}" target="_blank" class="explorer-source-badge clickable-source" title="Open ${c.source_doc} in a new tab">${c.source_doc}</a>
+                            <span class="explorer-score-tag ${isExcluded ? 'excluded' : ''}">${rerankText} (Ref #${c.paragraph_id.split('_').pop()})</span>
                         </div>
                         <div class="explorer-passage-text">
                             ${c.text}
