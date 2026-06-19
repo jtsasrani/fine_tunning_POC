@@ -13,7 +13,7 @@ import re
 import time
 import ast
 import torch
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template, send_from_directory
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoModel, BitsAndBytesConfig
 import faiss
 from sentence_transformers import CrossEncoder
@@ -307,8 +307,11 @@ def handle_generate():
             chat_messages.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
             
         if use_rag:
+            # Filter out contexts with score < -1.0 to avoid low-quality or irrelevant context
+            filtered_contexts = [ctx for ctx in contexts if ctx.get('score', 0.0) >= -1.0]
+            
             context_parts = []
-            for ctx in contexts:
+            for ctx in filtered_contexts:
                 pid = ctx.get('paragraph_id', '')
                 doc = ctx.get('source_doc', '')
                 text = ctx.get('text', '')
@@ -352,6 +355,18 @@ def handle_generate():
     except Exception as e:
         print(f"Error in generate for {model_name}: {e}", flush=True)
         return jsonify({"error": str(e)}), 500
+
+@app.route("/api/documents/<path:filename>", methods=["GET"])
+def serve_document(filename):
+    auth_err = check_auth()
+    if auth_err:
+        return auth_err
+    directory = os.path.abspath("./source_pdfs")
+    try:
+        return send_from_directory(directory, filename)
+    except Exception as e:
+        print(f"Error serving document {filename}: {e}", flush=True)
+        return jsonify({"error": f"File not found: {filename}"}), 404
 
 @app.route("/api/metrics", methods=["GET"])
 def handle_metrics():
