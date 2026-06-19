@@ -365,6 +365,37 @@ This dashboard allows you to submit custom policy queries, select pre-seeded que
 
 ---
 
+## AWS EC2 Production Service Operations (Start/Stop)
+
+If you are running the POC in the AWS production environment (using Gunicorn on the GPU EC2 instance), use the following commands to manage the server process:
+
+### 1. Connecting to the Instance
+Connect to the EC2 GPU instance from your local terminal:
+```bash
+ssh -i .\gpu_poc_EUR.pem ubuntu@i-09e7b81b6184aebaa
+```
+
+### 2. Starting the Service
+Navigate to the project directory and start the Gunicorn WSGI server in the background (detached using `nohup`):
+```bash
+cd /home/ubuntu/dwp-cmg-finetune
+nohup env API_KEY='dwp-cmg-sec-key-7d9a1f8c' /opt/pytorch/bin/gunicorn -c gunicorn.conf.py app:app > server_new.log 2>&1 </dev/null &
+```
+
+### 3. Stopping the Service
+Kill the active Gunicorn master and worker processes:
+```bash
+pkill -f gunicorn
+```
+
+### 4. Monitoring Server Logs
+To check preloading progress or review client HTTP query logs in real time:
+```bash
+tail -f /home/ubuntu/dwp-cmg-finetune/server_new.log
+```
+
+---
+
 ## What Comes Next?
 
 The POC successfully demonstrated that:
