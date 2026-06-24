@@ -1,59 +1,93 @@
-# DWP CMS Decision Support Suite: RAG & Citation Guide for Decision Makers
+# User Guide: RAG & Citation Interpretation for Decision Makers
 
-This guide provides Decision Makers and Caseworkers with a clear overview of how the RAG (Retrieval-Augmented Generation) search system, citation markers, and relevance scores work in the Decision Support Suite.
-
----
-
-## 🔍 How Policy Search Works
-
-When you submit a casework question, the AI does not just guess the answer from memory. Instead, the search engine runs a **Hybrid Search** against the indexed policy guides:
-1. **Semantic (Vector) Search**: Converts your question into a mathematical fingerprint and finds paragraphs with similar concepts, even if they use different words.
-2. **Keyword (Lexical) Search**: Looks for exact terminology matches (e.g., "NRP", "gross weekly income", "variance rule").
-3. **Cross-Encoder Reranking**: Takes the combined search results and runs them through a second evaluation step to assign a precise **Rerank Score** based on how accurately the paragraph answers your specific question.
+**Document Control**
+* **Title**: DWP CMS Decision Support Suite - Caseworker Search & Citation Guide
+* **Version**: 2.0 (Production Release)
+* **Author**: Operations Product Owner
+* **Target Audience**: CMS Caseworkers, Decision Makers, Appeals Officers
+* **Status**: Approved
 
 ---
 
-## 📊 Understanding the Rerank Score
+## 🔍 1. Behind the Scenes: How Policy Search Works
 
-The Rerank Score is based on a **logit scale** (real numbers ranging from $-\infty$ to $+\infty$), rather than standard percentages or 0-to-1 probabilities.
+When you submit a query to the AI Decision Support Suite, the system does not generate an answer from raw memory. It executes a multi-stage **Hybrid Search** against the indexed DWP Child Maintenance Service (CMS) manuals:
 
-Here is how to interpret the scores in practice:
+```
+                  ┌──────────────────────────────┐
+                  │   Caseworker Search Query    │
+                  └──────────────┬───────────────┘
+                                 │
+                 ┌───────────────┴───────────────┐
+                 ▼                               ▼
+       Dense Semantic Search           Sparse Keyword Search
+       (BGE-base-en-v1.5)              (Lexical Overlap + Term Mapping)
+                 │                               │
+                 └───────────────┬───────────────┘
+                                 ▼
+                       Candidate Passage Union
+                                 │
+                                 ▼
+                     Cross-Encoder Reranking
+                 (ms-marco-MiniLM-L-6-v2 model)
+                                 │
+                                 ▼
+                      Passage Sorting & Filtering
+                 (Threshold: -1.0 Logit Relevance)
+```
 
-| Rerank Score | Relevance Tier | AI Prompt Inclusion | UI Visual Styling |
+### Automatic Term Mapping & Query Expansion
+To ensure that search results are resilient to different wording, the keyword engine automatically maps common caseworker phrases to their official statutory terms:
+* **"paying parent"** or **"parent"** $\to$ automatically matches and indexes against **"NRP"** (Non-Resident Parent).
+* **"variance"** $\to$ automatically expands to match **"differ"**, **"differs"**, **"difference"**, **"change"**, or **"changed"**.
+
+This guarantees that searching for a colloquial caseworker scenario (e.g., "what if the paying parent gets unearned income") successfully retrieves official policy paragraphs written using strict legal vocabulary (e.g., "unearned income variance rules for the NRP").
+
+---
+
+## 📊 2. Understanding the Rerank Score
+
+Candidate paragraphs are evaluated by a secondary machine learning model called a **Cross-Encoder Reranker**. This model assigns a score based on how accurately the text answers your question.
+
+### The Logit Scale
+Unlike standard percentages ($0\%$ to $100\%$) or scores restricted between $0.0$ and $1.0$, the Reranker uses a **logit scale** (real numbers ranging from negative to positive infinity).
+
+| Rerank Score | Relevance Tier | Prompt Inclusion | UI Visual Styling |
 | :--- | :--- | :--- | :--- |
-| **Score $\ge$ 1.0** | **Highly Relevant** | Included in Context | Solid border, cyan badge. Represents a direct, explicit answer to your question. |
-| **Score -1.0 to 1.0** | **Semantically Relevant** | Included in Context | Solid border, purple/gray badge. Useful background information or tangential policy context. |
-| **Score $<$ -1.0** | **Irrelevant / Low Quality** | **Omitted** (Excluded) | **Dashed border, 60% opacity (dimmed)**, red score badge marked as `(Excluded)`. |
+| **Score $\ge$ 1.0** | **Highly Relevant** | Included in Context | **Solid cyan border, cyan badge**. Directly answers the query. |
+| **Score -1.0 to 1.0** | **Semantically Relevant** | Included in Context | **Solid purple border, purple/gray badge**. Useful context. |
+| **Score $<$ -1.0** | **Low Relevance** | **Omitted from Prompt** | **Dashed red border, 60% opacity (dimmed)**, red score badge labeled `(Excluded)`. |
 
 ---
 
-## 🚫 Why Are Low-scoring Passages Excluded?
+## 🚫 3. Excluded Passages: Why Are They Visible?
 
-If the AI reads irrelevant or low-quality paragraphs, it can become confused or invent facts (known as **hallucination**). To protect the integrity of the casework:
+If the AI model reads irrelevant paragraphs, it can become confused and generate incorrect or invented answers (known as **hallucinations**). To protect casework integrity:
 * Passages with a score **below -1.0** are stripped from the reference material fed to the model before it generates the answer.
-* However, the system **still displays them in the citations drawer and RAG Explorer** so you can inspect what the search engine found and double-check the policy context yourself.
+* **Why show them?**: The system displays these excluded passages in the **Citations Drawer** and the **RAG Explorer** with a dimmed 60% opacity and dashed border. This allows you to audit the search engine's performance, inspect low-scoring documents, and verify if a policy was correctly excluded.
 
 ---
 
-## 📄 Clicking Badges to Open Documents
+## 📄 4. Interactive PDF Badges & Inline Reading
 
-In both the Chat Citations drawer and the RAG Explorer panel, the document badges (e.g. `2012-System-Overview.pdf`) are interactive:
-* **Action**: Click the document name.
-* **Result**: The original policy PDF or HTML guide will open directly in a new browser tab.
-* **Inline Reading**: The PDF will render inline inside the browser, allowing you to scroll, search, and verify the paragraph text in its original official layout without downloading the file.
+In the Chat Citations drawer and the RAG Explorer panel, document badges (e.g., `volume-3-variations-chapters-27-36.pdf`) are interactive:
+
+* **Click to Open**: Click any document badge to open the original DWP manual in a new browser tab.
+* **Secure Inline Rendering**: The application streams the file directly from the secure server storage `/home/ubuntu/dwp-cmg-finetune/source_pdfs/` to render inline in the browser. You can view the document's original official layout, tables, and surrounding paragraphs without downloading files to your computer.
 
 ---
 
-## 💡 Tips for Writing Effective Casework Queries
+## 💡 5. Tips for Writing Effective Queries
 
-To get the highest retrieval scores and the most accurate AI answers, write your queries using these best practices:
+Follow these search guidelines to obtain the highest relevance scores and the most accurate AI answers:
 
-* **Use CMS-Specific Terminology**: Use standard terminology rather than informal phrases.
-  * *Instead of*: "what happens if the paying father gets a raise"
-  * *Use*: "gross weekly income variation rules for NRP"
-* **Provide Contextual Details**: Give details about the specific policy condition.
-  * *Instead of*: "pension rules"
-  * *Use*: "deducting pension contributions from gross weekly income calculations"
-* **Cite Sections if Known**: If you are referencing a specific regulation chapter, mention it.
-  * *Instead of*: "enforcement orders"
-  * *Use*: "liability order magistrates court process"
+* **Specify the Role or Party**: Use specific terms like "NRP" or "Receiving Parent" if the policy differs by role.
+  * *Instead of*: "what happens if a parent gets a pension"
+  * *Use*: "how pension contributions affect gross weekly income calculations for the NRP"
+* **Target Specific Policy Concepts**: Use official DWP phrasing.
+  * *Instead of*: "father has a side job making money"
+  * *Use*: "unearned income variance rules"
+* **Focus on Policy, Not Action Commands**: Frame queries as statements of inquiry.
+  * *Instead of*: "calculate child support for income 500"
+  * *Use*: "gross weekly income calculation thresholds and rates"
+

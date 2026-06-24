@@ -1,80 +1,120 @@
-# DWP CMS Decision Support Suite: Model Fine-Tuning Operations & Hyperparameter Guide
+# Standard Technical Manual: Model Fine-Tuning Operations & Hyperparameter Guide
 
-This guide details the fine-tuning methodology, dataset formatting, hyperparameter configurations, and GPU memory optimizations implemented in the DWP CMS Decision Support Suite. Use this reference when executing future training cycles to update or expand the model's domain expertise.
+**Document Control**
+* **Title**: DWP CMS Decision Support Suite - Fine-Tuning & Model Lifecycle Guide
+* **Version**: 2.0 (Production Release)
+* **Author**: Lead AI Researcher
+* **Target Audience**: AI/ML Engineers, Data Scientists
+* **Status**: Approved
 
 ---
 
-## 🧠 Fine-Tuning Methodology
+## 🧠 1. Fine-Tuning Methodology
 
-The model is trained using **QLoRA (Quantized Low-Rank Adaptation)** on the base model `Qwen/Qwen2.5-14B-Instruct`. QLoRA loads the base model weights at 4-bit precision (NF4 quantization) and injects trainable low-rank adapters into the attention and projection layers, drastically reducing the required training VRAM while preserving downstream model reasoning.
+The DWP CMS Decision Support model is trained using **QLoRA (Quantized Low-Rank Adaptation)** on top of `Qwen/Qwen2.5-14B-Instruct`. 
+
+### Key Concepts
+* **4-Bit Base Quantization**: The base 14B parameter model is loaded in 4-bit NormalFloat (NF4) precision to minimize the VRAM footprint.
+* **Low-Rank Adapters (LoRA)**: Trainable low-rank weight matrices are injected into the attention layers and feed-forward projections. This freezes the baseline model's extensive parametric knowledge while adapting it to the structured formats, styles, and policy citation constraints required by DWP casework.
+* **Target Modules**: Adapters are applied across all linear layers to ensure optimal capacity representation:
+  `q_proj`, `k_proj`, `v_proj`, `o_proj`, `gate_proj`, `up_proj`, `down_proj`
 
 ---
 
-## 📋 Training Dataset Formatting
+## ⚙️ 2. Synthetic Data Generation & Preprocessing Pipeline
 
-The training pipeline requires a JSON Lines (`.jsonl`) dataset with the following structure:
+Before fine-tuning, training data is synthetically generated from policy manuals and filtered for high accuracy.
+
+```
+01_ingest_all_pdfs.py ──> real_chunks.jsonl ──> 07_generate_training_data_local.py
+                                                           │
+                                                           ▼
+08_merge_training_data.py <── MinHash LSH <── llm_generated_training_data.jsonl
+         │
+         ├──> train_split.jsonl (90%)
+         ├──> val_split.jsonl   (10%)
+         └──> evaluation_set.jsonl (Golden 35-item split)
+```
+
+### A. Data Generation (`07_generate_training_data_local.py`)
+To bootstrap domain-specific instruction pairs, a **Qwen2.5-32B-Instruct** teacher model is utilized to run a dual-pass dataset generation pipeline:
+1. **Pass 1: Question & Answer Generation**: For each chunk in `data/real_chunks.jsonl`, the model generates a realistic caseworker query along with a statutory response grounded strictly in the chunk's text.
+2. **Pass 2: Tier-2 Judge Verification**: The generated question and answer are passed back to the model in a low-temperature inference pass (`temperature=0.1`). The model is prompted to judge if the answer contains external assumptions or is fully supported. Non-conforming samples (labeled `FAIL`) are immediately discarded.
+* *Resource Footprint*: The teacher model uses $\approx 19.5\text{ GB}$ of VRAM (4-bit quantization). Processing the full manual set takes **$\approx 34$ hours** on a single A10G GPU.
+
+### B. Deduplication and Splitting (`08_merge_training_data.py`)
+To prevent the student model from overfitting on similar synthetic constructs:
+* **Fuzzy Deduplication**: Implements **MinHash LSH** (Locality Sensitive Hashing) via the `datasketch` library with a Jaccard similarity threshold of `0.85` across 128 permutations.
+* **Dataset Splitting**: Shuffles the deduplicated dataset and splits it into:
+  * **Train Split (90%)**: `data/train_split.jsonl` - Used by the trainer.
+  * **Validation Split (10%)**: `data/val_split.jsonl` - Used for epoch evaluation.
+  * **Golden Evaluation Set**: Extracts the first 35 items from the validation split into `data/evaluation_set.jsonl` as a gold-standard benchmarking set.
+
+---
+
+## 📋 3. Training Dataset Schema & Prompt Baking
+
+The training dataset splits are stored as JSON Lines (`.jsonl`). Each object contains:
 ```json
 {
-  "instruction": "Caseworker question text...",
+  "instruction": "Caseworker query text...",
   "output": "Statutory policy-grounded answer text...",
   "paragraph_id": "document_name_paragraph_index"
 }
 ```
-* **System Prompt Baking**: During ingestion, the script automatically formats each record using Qwen's chat template, embedding the official CMS system prompt:
-  ```text
-  You are an expert Decision Maker assistant for the DWP Child Maintenance Service (CMS). Answer questions accurately using only the provided policy context. Cite specific paragraph numbers, rules, and sections where present. If the context does not contain sufficient information, state this clearly.
-  ```
-* **Context Baking**: The text content corresponding to the `paragraph_id` is retrieved from `data/real_chunks.jsonl` and appended to the user instruction under a `Context:` prefix, training the model to prioritize retrieved reference data over its pre-trained parametric memory.
+
+### Context & System Prompt Baking
+During data collation in the SFT Trainer, the context paragraph matching the `paragraph_id` is fetched and formatted as:
+```text
+System: You are an expert Decision Maker assistant for the DWP Child Maintenance Service (CMS). Answer questions accurately using only the provided policy context. Cite specific paragraph numbers, rules, and sections where present. If the context does not contain sufficient information, state this clearly.
+
+User: Context: [Fetched Paragraph Text]
+Question: [Instruction]
+
+Assistant: [Output]
+```
+This formats the training examples exactly like the active application prompt, ensuring consistent instruction-following behavior during production inference.
 
 ---
 
-## ⚙️ Hyperparameter Configuration Reference
+## ⚙️ 4. Hyperparameter Reference Table
 
-The following parameters are configured in [02_train_qlora_gpu.py](file:///c:/Users/JitendraAsrani/DWP_CMG_Finetune/02_train_qlora_gpu.py) for the fine-tuning run:
+These parameters are defined in [02_train_qlora_gpu.py](file:///c:/Users/JitendraAsrani/DWP_CMG_Finetune/02_train_qlora_gpu.py):
 
 | Hyperparameter | Value | Description |
 | :--- | :--- | :--- |
-| `max_seq_length` | `2048` | Maximum token sequence length allowed per training sample. |
-| `lora_r` | `32` | LoRA rank (dimension of the low-rank update matrices). |
-| `lora_alpha` | `64` | LoRA scaling factor (typically set to $2 \times$ `lora_r`). |
-| `learning_rate` | `1e-4` | Peak learning rate for the AdamW optimizer. |
-| `lr_scheduler_type` | `"cosine"` | Cosine decay schedule for adjusting learning rate during epochs. |
-| `warmup_ratio` | `0.05` | First 5% of training steps are used to warm up learning rate linearly. |
-| `epochs` | `3` | Total number of passes over the training dataset. |
-| `batch_size` | `1` | Per-device training batch size. Keep at `1` to avoid VRAM OOM errors. |
-| `gradient_accumulation_steps` | `16` | Number of steps to accumulate gradients before executing an optimizer step. Effective batch size = $1 \times 16 = 16$. |
-| `weight_decay` | `0.01` | L2 weight regularization factor to prevent overfitting. |
+| `max_seq_length` | `2048` | Max token context window. Restricts VRAM spikes during long generations. |
+| `lora_r` | `32` | Rank dimension. Provides a balanced capacity for learning citation structures. |
+| `lora_alpha` | `64` | Scale multiplier. Usually set to $2 \times$ `lora_r` for scaling gradient updates. |
+| `learning_rate` | `1e-4` | Peak learning rate. Prevents catastrophic forgetting of base model reasoning. |
+| `lr_scheduler_type` | `"cosine"` | Cosine decay schedule. Gradually decreases learning rate to stabilize convergence. |
+| `warmup_ratio` | `0.05` | Linear warmup over the first 5% of training steps to prevent gradient explosion. |
+| `epochs` | `3` | Number of complete passes over the training set. |
+| `batch_size` | `1` | Per-device batch size. Kept at `1` to avoid VRAM fragmentation. |
+| `gradient_accumulation_steps` | `16` | Accumulates gradients over 16 steps before updating weights. Effective batch size = 16. |
+| `weight_decay` | `0.01` | L2 weight regularizer applied to prevent overfitting on specific phrasing. |
+| `optim` | `"adamw_8bit"`| 8-bit AdamW optimizer. Saves 75% VRAM compared to 32-bit. |
 
 ---
 
-## ⚡ GPU VRAM Optimizations
+## ⚡ 5. GPU VRAM Optimization Techniques
 
-To train a 14-billion parameter model on a single NVIDIA A10G (24GB VRAM) GPU, the following memory optimizations must be active:
-
-1. **Unsloth Fast Language Model**: Utilizes specialized Triton kernels that reduce VRAM overhead by 60% compared to standard Hugging Face PEFT.
-2. **Expandable Segments**: Enabled via PyTorch environment flags:
+Training a 14B model on a single 24GB VRAM GPU (A10G) is made possible through:
+1. **Unsloth Triton Kernels**: Replaces standard PyTorch linear layers with highly optimized Triton kernels, reducing VRAM usage by ~60% and speeding up training by $2\times$.
+2. **Expandable Segments**: Pre-allocates memory segments to prevent allocation fragmentation:
    ```python
    os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
    ```
-   This prevents memory fragmentation, keeping memory allocation contiguous.
-3. **8-Bit Optimizer**: Configured with `optim="adamw_8bit"` to reduce optimizer state VRAM footprint by 75% compared to 32-bit AdamW.
-4. **Gradient Checkpointing**: Configured to recalculate intermediate activations during backward passes instead of saving them:
-   ```python
-   use_gradient_checkpointing="unsloth"
-   ```
+3. **Gradient Checkpointing**: Activates `unsloth` gradient checkpointing to recompute activations during backpropagation instead of caching them in GPU memory.
 
 ---
 
-## 🏃 Execution & Merging
+## 🏃 6. Running Training & Weight Merging
 
-Follow these commands to run a fine-tuning cycle:
-
+### Execute Training
+Run the training script on the host machine:
 ```bash
-# 1. Activate the GPU conda environment
 conda activate pytorch
-
-# 2. Run the training script
-# The script will save the LoRA adapter AND export the merged 16-bit model
 python3 02_train_qlora_gpu.py \
     --model_name "Qwen/Qwen2.5-14B-Instruct" \
     --train_data "data/train_split.jsonl" \
@@ -85,7 +125,29 @@ python3 02_train_qlora_gpu.py \
 ```
 
 ### Weight Merging
-The training script automatically executes `model.save_pretrained_merged()` to combine base model weights and LoRA adapters:
-* **Merged folder output**: `./trained_models/qwen-14b-cms-qlora_merged`
-* **Format**: Standard FP16/BF16 Hugging Face weight tensors (`.safetensors`).
-* **Deployability**: Ready to be loaded immediately by the backend `vLLM` engine for zero-downtime server updates.
+On completion, the script merges the LoRA parameters back into the base 16-bit model weights:
+```python
+# Internal script logic executing unsloth merged save
+model.save_pretrained_merged(
+    "./trained_models/qwen-14b-cms-qlora_merged",
+    tokenizer,
+    save_method="merged_16bit"
+)
+```
+This outputs a standalone folder `./trained_models/qwen-14b-cms-qlora_merged/` containing standard Hugging Face weights (`.safetensors`), ready for deployment in vLLM.
+
+---
+
+## 🔬 7. Model Evaluation Suite & Metrics
+
+Post-training, run the evaluation suite to measure performance metrics:
+```bash
+python3 09_evaluate_model.py --model_path "./trained_models/qwen-14b-cms-qlora_merged"
+```
+The script runs the model in deterministic greedy mode (`temperature=0.0`) against the Golden Evaluation Set and outputs:
+
+1. **Generation Speed**: Measured in tokens per second. (Target: $> 25\text{ tok/sec}$ under vLLM).
+2. **ROUGE-L Score**: Measures exact n-gram matching and LCS sequence overlap against golden ground truth answers.
+3. **BERTScore F1**: Evaluates semantic similarity using contextual embeddings, capturing correct policy statements even if formulated using different terminology.
+4. **VRAM Footprint**: Logs peak VRAM usage during model generation.
+
