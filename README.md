@@ -42,26 +42,52 @@ We ingested and indexed **603 official DWP policy PDF manuals** located in `sour
 
 You can run the entire pipeline from scratch by executing these scripts in order:
 
-### Step 1: `01_ingest_all_pdfs.py` — Ingest policy documents
-* Extracts text from the 603 PDFs, dynamically filters repeating headers/footers, and outputs paragraph records to `data/real_chunks.jsonl`.
+* **Step 1: `01_ingest_all_pdfs.py` — Ingest policy documents**
+  Extracts text from the 603 PDFs, dynamically filters repeating headers/footers, and outputs paragraph records to `data/real_chunks.jsonl`.
+* **Step 2: `07_generate_training_data_local.py` — Generate Q&A training pairs**
+  Uses the Qwen-32B teacher model in 4-bit to generate QA pairs. (Runs a generation pass and a validation check pass; takes $\approx 34$ hours on a single A10G GPU).
+* **Step 3: `08_merge_training_data.py` — Deduplicate datasets**
+  Applies MinHash LSH (Jaccard similarity threshold = 0.85) to remove duplicates, and splits unique pairs into 90% train / 10% validation sets.
+* **Step 4: `05_build_vector_db.py` — Index the search library**
+  Segments paragraphs exceeding 500 tokens (100 token overlap), extracts normalized BGE-base embeddings, and builds the FAISS similarity index (`vector_db.index`).
+* **Step 5: `02_train_qlora_gpu.py` — Fine-tune model**
+  Trains Qwen-14B in 4-bit via Unsloth/QLoRA on the unique splits (2400 steps), merges adapters into base weights at 16-bit, and exports the merged model.
+* **Step 6: `09_evaluate_model.py` — Run validation checks**
+  Runs benchmark evaluations against the evaluation set, reporting ROUGE-L, BERTScore F1, and average latency.
+* **Step 7: `app.py` — Web Dashboard Server**
+  Launches the API and dashboard backend.
 
-### Step 2: `07_generate_training_data_local.py` — Generate Q&A training pairs
-* Uses the Qwen-32B teacher model in 4-bit to generate QA pairs. (Runs a generation pass and a validation check pass; takes $\approx 34$ hours on a single A10G GPU).
+### ⚙️ Automated Pipeline Execution
+For convenience, you can orchestrate the post-generation training and evaluation steps automatically using the automation runner:
+```bash
+python3 run_pipeline_end_to_end.py
+```
+* **Behavior**: This script monitors the synthetic Q&A generation process (verifies output), runs dataset merging and deduplication, executes SFT/QLoRA training (saving the merged 16-bit weights), and compiles the final evaluation metrics report. Logs for each step are outputted to the `data/` directory (e.g. `data/pipeline_step6_training.log`).
 
-### Step 3: `08_merge_training_data.py` — Deduplicate datasets
-* Applies MinHash LSH (Jaccard similarity threshold = 0.85) to remove duplicates, and splits unique pairs into 90% train / 10% validation sets.
+---
 
-### Step 4: `05_build_vector_db.py` — Index the search library
-* Segments paragraphs exceeding 500 tokens (100 token overlap), extracts normalized BGE-base embeddings, and builds the FAISS similarity index (`vector_db.index`).
+## 📖 Operational Documentation & Reference Guides
 
-### Step 5: `02_train_qlora_gpu.py` — Fine-tune model
-* Trains Qwen-14B in 4-bit via Unsloth/QLoRA on the unique splits (2400 steps), merges adapters into base weights at 16-bit, and exports the merged model.
+To ensure the long-term maintainability, scalability, and auditability of the Decision Support Suite, the following comprehensive reference manuals have been prepared and reside in the `data/` folder:
 
-### Step 6: `09_evaluate_model.py` — Run validation checks
-* Runs benchmark evaluations against the evaluation set, reporting ROUGE-L, BERTScore F1, and average latency.
-
-### Step 7: `app.py` — Web Dashboard Server
-* Launches the API and dashboard backend.
+1. **[RAG Database Maintenance Runbook](file:///c:/Users/JitendraAsrani/DWP_CMG_Finetune/data/rag_database_maintenance_runbook.md)**
+   * *Target Audience*: DevOps / SysAdmins.
+   * *Contents*: Procedures to add, update, or remove manuals in `source_pdfs/`, rebuild the FAISS vector database, run python integrity sanity tests, perform zero-downtime swaps on the active server, and execute emergency rollbacks.
+2. **[Model Fine-Tuning Operations Guide](file:///c:/Users/JitendraAsrani/DWP_CMG_Finetune/data/model_finetuning_operations_guide.md)**
+   * *Target Audience*: ML Engineers / Data Scientists.
+   * *Contents*: Step-by-step description of the QLoRA training parameters, memory configurations (Triton kernels, adamw_8bit, expandable segments), synthetic data generation flows (dual-pass teacher checks), and MinHash LSH deduplication.
+3. **[RAG & Citation User Guide](file:///c:/Users/JitendraAsrani/DWP_CMG_Finetune/data/caseworker_rag_citation_guide.md)**
+   * *Target Audience*: Caseworkers / Decision Makers.
+   * *Contents*: Overview of hybrid search, automatic term mappings (e.g., mapping `"paying parent"` to `"NRP"`), logit-scale Rerank Scores, the rationale behind the `-1.0` relevance threshold, and using interactive inline PDF document badges.
+4. **[Qwen 14B Documentation & Transfer Plan](file:///c:/Users/JitendraAsrani/DWP_CMG_Finetune/data/QWEN_14B_documentation_and_transfer_plan_V1.0.md)**
+   * *Target Audience*: Infrastructure Engineers / Architects.
+   * *Contents*: Specifications for production AWS instance hosting (`g5.12xlarge`), model packaging, private Hugging Face repository transfer bridges, target server software installations (DLAMI environment setup), and Nginx reverse proxy SSL configurations.
+5. **[Programmatic API Access Guide](file:///c:/Users/JitendraAsrani/DWP_CMG_Finetune/data/api_access_guide_14B_QWEN.md)**
+   * *Target Audience*: Integrations / Software Developers.
+   * *Contents*: Developer documentation containing curl requests, Python client scripts, and output schemas to integrate the Decision Support chatbot and retriever API endpoints with third-party casework systems.
+6. **[Model Evaluation & Benchmarking Report](file:///c:/Users/JitendraAsrani/DWP_CMG_Finetune/data/evaluation_report.md)**
+   * *Target Audience*: Stakeholders / QA Analysts.
+   * *Contents*: Performance results of the Qwen-14B CMS model compared to other configurations, detailing token generation speeds, ROUGE-L, and BERTScore F1 metric achievements.
 
 ---
 
