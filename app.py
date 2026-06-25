@@ -205,12 +205,59 @@ def handle_retrieve():
         
     data = request.get_json() or {}
     query = data.get("query", "").strip()
+    history = data.get("history", []) or data.get("messages", [])
     if not query:
         return jsonify({"error": "Empty query provided."}), 400
         
     try:
         t0 = time.time()
-        retrieved_items = retrieve_context_hybrid_rerank(query, top_k=3)
+        
+        # Query Condensation for multi-turn RAG
+        search_query = query
+        is_condensed = False
+        clean_history = [m for m in history if m.get("role") in ["user", "assistant"]]
+        
+        # We only condense if there is active history beyond the current query
+        if not DEMO_MODE and llm_engine and len(clean_history) > 1:
+            try:
+                prior_history = clean_history[:-1]
+                
+                system_prompt = (
+                    "You are a search query optimizer for the DWP Child Maintenance Service (CMS). "
+                    "Analyze the conversation history and the new follow-up question, and output a single, "
+                    "concise standalone search query in plain text. "
+                    "The search query must combine the context from the history and the new question to retrieve relevant policy documents. "
+                    "Do not write any introductory text, explanations, or conversational responses. Only output the rephrased query."
+                )
+                
+                temp_messages = [{"role": "system", "content": system_prompt}]
+                for msg in prior_history[-4:]: # Limit to last 2 turns to keep it extremely fast
+                    temp_messages.append({"role": msg.get("role"), "content": msg.get("content")})
+                temp_messages.append({"role": "user", "content": f"Rephrase this follow-up question to a standalone search query: {query}"})
+                
+                tok = tokenizer_dict.get("qwen_14b_tuned")
+                if tok:
+                    prompt = tok.apply_chat_template(temp_messages, tokenize=False, add_generation_prompt=True)
+                    
+                    from vllm import SamplingParams
+                    sampling_params = SamplingParams(
+                        temperature=0.0,
+                        max_tokens=40,
+                        stop_token_ids=[tok.eos_token_id]
+                    )
+                    
+                    outputs = llm_engine.generate([prompt], sampling_params, use_tqdm=False)
+                    gen_text = outputs[0].outputs[0].text.strip()
+                    # Strip any wrapping quotes
+                    gen_text = gen_text.replace('"', '').replace("'", "").strip()
+                    if gen_text:
+                        search_query = gen_text
+                        is_condensed = True
+                        print(f"[Query Condensation] Original: '{query}' -> Condensed: '{search_query}'", flush=True)
+            except Exception as cond_err:
+                print(f"[Query Condensation Error] Failed to condense, falling back to original query: {cond_err}", flush=True)
+        
+        retrieved_items = retrieve_context_hybrid_rerank(search_query, top_k=3)
         retrieval_time = time.time() - t0
         
         retrieved_data = []
@@ -226,6 +273,8 @@ def handle_retrieve():
             
         return jsonify({
             "query": query,
+            "search_query": search_query,
+            "is_condensed": is_condensed,
             "retrieved_contexts": retrieved_data,
             "retrieval_time": round(retrieval_time, 3)
         })

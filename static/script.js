@@ -225,12 +225,14 @@ document.addEventListener("DOMContentLoaded", () => {
         try {
             let contexts = [];
             
-            // 1. RAG Retrieval Step (if enabled)
             if (ragToggle.checked) {
                 const retrieveResponse = await fetch("/api/query/retrieve", {
                     method: "POST",
                     headers: authHeaders(),
-                    body: JSON.stringify({ query: text })
+                    body: JSON.stringify({ 
+                        query: text,
+                        history: conversationMessages
+                    })
                 });
                 
                 if (retrieveResponse.ok) {
