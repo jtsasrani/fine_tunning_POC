@@ -1,20 +1,13 @@
 import os
 import sys
-
-# Ensure vLLM/Triton binaries like ninja can be found in the virtual environment's bin folder
-venv_bin = "/opt/pytorch/bin"
-if os.path.exists(venv_bin):
-    os.environ["PATH"] = venv_bin + os.path.pathsep + os.environ.get("PATH", "")
-
-# Disable FlashInfer JIT sampler which requires a full system CUDA toolkit installation matching headers
-os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
-
 import re
 import time
 import ast
+import json
+import boto3
 import torch
 from flask import Flask, request, jsonify, render_template, send_from_directory
-from transformers import AutoTokenizer, AutoModelForCausalLM, AutoModel, BitsAndBytesConfig
+from transformers import AutoTokenizer, AutoModel
 import faiss
 from sentence_transformers import CrossEncoder
 
@@ -25,9 +18,13 @@ app.config["TEMPLATES_AUTO_RELOAD"] = True
 os.environ["HF_HUB_OFFLINE"] = "0"
 os.environ["TRANSFORMERS_OFFLINE"] = "0"
 
-# Detect Demo/Mock Mode at import time to preserve GPU resources
-# Runs on CPU-only for reader models if --demo flag is present or environment variable set
+# Detect Demo/Mock Mode at import time to preserve resources
 DEMO_MODE = "--demo" in sys.argv or os.environ.get("DEMO_MODE", "0") == "1"
+
+# SageMaker configuration
+SAGEMAKER_ENDPOINT_NAME = "dwp-cmg-llama-8b-endpoint-v2"
+AWS_REGION = "us-east-1"
+sagemaker_runtime = None
 
 # Global references for models & database
 db_data = None
@@ -35,11 +32,9 @@ faiss_index = None
 embed_tokenizer = None
 embed_model = None
 reranker = None
-tokenizer_dict = {}
-model_dict = {}
-llm_engine = None
+model_dict = {}  # Keeps app interface compatible with model listings
 
-# System prompt for RAG answers (aligned with Phase 3 Training)
+# System prompt for RAG answers (aligned with Llama 3.1 fine-tuning)
 SYSTEM_PROMPT = (
     "You are an expert Decision Maker assistant for the DWP Child Maintenance Service (CMS). "
     "Answer questions accurately using only the provided policy context. "
@@ -122,8 +117,54 @@ def retrieve_context_hybrid_rerank(query, top_k=3):
         })
     return retrieved
 
+def get_sagemaker_runtime_client():
+    global sagemaker_runtime
+    if sagemaker_runtime is None:
+        sagemaker_runtime = boto3.client("sagemaker-runtime", region_name=AWS_REGION)
+    return sagemaker_runtime
+
+def call_sagemaker_endpoint(prompt, max_tokens=512, temperature=0.3):
+    client = get_sagemaker_runtime_client()
+    # TGI container parameters
+    payload = {
+        "inputs": prompt,
+        "parameters": {
+            "max_new_tokens": max_tokens,
+            "temperature": temperature,
+            "top_p": 0.9,
+            "repetition_penalty": 1.2,
+            "stop": ["<|eot_id|>"]
+        }
+    }
+    
+    try:
+        response = client.invoke_endpoint(
+            EndpointName=SAGEMAKER_ENDPOINT_NAME,
+            ContentType="application/json",
+            Body=json.dumps(payload)
+        )
+        result = json.loads(response["Body"].read().decode("utf-8"))
+        
+        # TGI returns [{"generated_text": "..."}]
+        if isinstance(result, list) and len(result) > 0:
+            gen_text = result[0].get("generated_text", "")
+        elif isinstance(result, dict):
+            gen_text = result.get("generated_text", "")
+        else:
+            gen_text = str(result)
+            
+        # TGI might return the prompt with the generation appended — strip it if it starts with the prompt
+        # (Though newer TGI versions return only the generated completion when setting return_full_text=False)
+        if gen_text.startswith(prompt):
+            gen_text = gen_text[len(prompt):].strip()
+        return gen_text.strip()
+    except Exception as e:
+        print(f"Error calling SageMaker endpoint: {e}", flush=True)
+        raise e
+
+
 def initialize_models():
-    global db_data, faiss_index, embed_tokenizer, embed_model, reranker, tokenizer_dict, model_dict, llm_engine, DEMO_MODE
+    global db_data, faiss_index, embed_tokenizer, embed_model, reranker, model_dict, DEMO_MODE
     
     db_file = "vector_db.pt"
     faiss_file = "vector_db.index"
@@ -132,7 +173,7 @@ def initialize_models():
         raise FileNotFoundError("Vector database or FAISS index not found. Run 05_build_vector_db.py first.")
         
     print("Loading vector database metadata...", flush=True)
-    db_data = torch.load(db_file)
+    db_data = torch.load(db_file, map_location="cpu")
     
     print("Loading FAISS index...", flush=True)
     faiss_index = faiss.read_index(faiss_file)
@@ -145,38 +186,24 @@ def initialize_models():
     
     reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2", device=device)
     
-    primary_model_path = os.path.abspath("./trained_models/qwen-14b-cms-qlora_merged")
-    
-    # Check if the primary local models folders actually exist. If not, auto-force DEMO_MODE
-    if not os.path.exists(primary_model_path):
-        print(f"Warning: Tuned model path '{primary_model_path}' not found. Auto-enabling Demo Mode.")
-        DEMO_MODE = True
-        
     if DEMO_MODE:
         print("=== RUNNING IN DEMO MODE ===")
-        print("Skipping VRAM-heavy reader LLM loads. Real FAISS + MS-Marco Cross-Encoder RAG is active on CPU.")
+        print("Skipping SageMaker endpoint connectivity checks. Mock/simulation response mode is active.")
         return
         
-    # Configure and load vLLM engine for Qwen-14B CMS
-    from vllm import LLM
-    print("Configuring and loading vLLM engine for Qwen-14B CMS...", flush=True)
+    print(f"Verifying SageMaker Endpoint '{SAGEMAKER_ENDPOINT_NAME}'...", flush=True)
     try:
-        # Load tokenizer for chat template parsing
-        tokenizer_dict["qwen_14b_tuned"] = AutoTokenizer.from_pretrained(primary_model_path)
-        
-        # Load model using vLLM in 4-bit quantization
-        llm_engine = LLM(
-            model=primary_model_path,
-            quantization="bitsandbytes",
-            gpu_memory_utilization=0.85,
-            max_model_len=4096
-        )
-        # Populate model_dict to keep API checks and metrics working properly
-        model_dict["qwen_14b_tuned"] = True
-        print("vLLM engine loaded successfully!", flush=True)
+        sm = boto3.client("sagemaker", region_name=AWS_REGION)
+        desc = sm.describe_endpoint(EndpointName=SAGEMAKER_ENDPOINT_NAME)
+        status = desc["EndpointStatus"]
+        print(f"SageMaker Endpoint Status: {status}", flush=True)
+        if status == "InService":
+            model_dict[SAGEMAKER_ENDPOINT_NAME] = True
+            print("SageMaker Endpoint is active and registered in dashboard.", flush=True)
+        else:
+            print(f"Warning: SageMaker Endpoint is '{status}' (not InService). Dashboard will fall back to simulation.", flush=True)
     except Exception as e:
-        print(f"Error loading vLLM engine: {e}", flush=True)
-        raise e
+        print(f"Warning: Could not connect to SageMaker endpoint: {e}. Dashboard will run in simulation mode.", flush=True)
 
 API_KEY = os.environ.get("API_KEY", "dwp-cmg-sec-key-7d9a1f8c")
 
@@ -218,7 +245,7 @@ def handle_retrieve():
         clean_history = [m for m in history if m.get("role") in ["user", "assistant"]]
         
         # We only condense if there is active history beyond the current query
-        if not DEMO_MODE and llm_engine and len(clean_history) > 1:
+        if not DEMO_MODE and SAGEMAKER_ENDPOINT_NAME in model_dict and len(clean_history) > 1:
             try:
                 prior_history = clean_history[:-1]
                 
@@ -230,30 +257,23 @@ def handle_retrieve():
                     "Do not write any introductory text, explanations, or conversational responses. Only output the rephrased query."
                 )
                 
-                temp_messages = [{"role": "system", "content": system_prompt}]
-                for msg in prior_history[-4:]: # Limit to last 2 turns to keep it extremely fast
-                    temp_messages.append({"role": msg.get("role"), "content": msg.get("content")})
-                temp_messages.append({"role": "user", "content": f"Rephrase this follow-up question to a standalone search query: {query}"})
+                # Format Llama 3.1 prompt manually
+                prompt = "<|begin_of_text|>"
+                prompt += f"<|start_header_id|>system<|end_header_id|>\n{system_prompt}<|eot_id|>\n"
+                for msg in prior_history[-4:]: # Limit to last 2 turns to keep it fast
+                    role = msg.get("role", "user")
+                    content = msg.get("content", "")
+                    prompt += f"<|start_header_id|>{role}<|end_header_id|>\n{content}<|eot_id|>\n"
+                prompt += f"<|start_header_id|>user<|end_header_id|>\nRephrase this follow-up question to a standalone search query: {query}<|eot_id|>\n"
+                prompt += "<|start_header_id|>assistant<|end_header_id|>\n"
                 
-                tok = tokenizer_dict.get("qwen_14b_tuned")
-                if tok:
-                    prompt = tok.apply_chat_template(temp_messages, tokenize=False, add_generation_prompt=True)
-                    
-                    from vllm import SamplingParams
-                    sampling_params = SamplingParams(
-                        temperature=0.0,
-                        max_tokens=40,
-                        stop_token_ids=[tok.eos_token_id]
-                    )
-                    
-                    outputs = llm_engine.generate([prompt], sampling_params, use_tqdm=False)
-                    gen_text = outputs[0].outputs[0].text.strip()
-                    # Strip any wrapping quotes
-                    gen_text = gen_text.replace('"', '').replace("'", "").strip()
-                    if gen_text:
-                        search_query = gen_text
-                        is_condensed = True
-                        print(f"[Query Condensation] Original: '{query}' -> Condensed: '{search_query}'", flush=True)
+                gen_text = call_sagemaker_endpoint(prompt, max_tokens=40, temperature=0.0)
+                # Strip any wrapping quotes
+                gen_text = gen_text.replace('"', '').replace("'", "").strip()
+                if gen_text:
+                    search_query = gen_text
+                    is_condensed = True
+                    print(f"[Query Condensation] Original: '{query}' -> Condensed: '{search_query}'", flush=True)
             except Exception as cond_err:
                 print(f"[Query Condensation Error] Failed to condense, falling back to original query: {cond_err}", flush=True)
         
@@ -303,6 +323,10 @@ def handle_generate():
     if not query or not model_name:
         return jsonify({"error": "Query/messages and model name are required."}), 400
         
+    # Fallback legacy mapping for cached frontend sessions
+    if model_name == "qwen_14b_tuned":
+        model_name = SAGEMAKER_ENDPOINT_NAME
+        
     # Check if we should simulate generation (if in DEMO_MODE or if the model isn't loaded)
     if DEMO_MODE or model_name not in model_dict:
         t0 = time.time()
@@ -321,20 +345,20 @@ def handle_generate():
             summary = " ".join(sentences[:3])
             
             response = (
-                f"**[Demo Mode — Qwen-14B CMS Response Simulation]**\n\n"
+                f"**[Demo Mode — Llama-3.1-8B CMS Response Simulation]**\n\n"
                 f"Based on the official policy guide **{doc}** (Paragraph {pid}), the guidance states:\n\n"
                 f"> {summary}...\n\n"
                 f"**Retrieval Reference**:\n"
                 f"- Document: `{doc}`\n"
                 f"- Paragraph: `{pid}`\n"
                 f"- FAISS Rerank Score: `{best_chunk.get('score', 'N/A')}`\n\n"
-                f"*Note: The Qwen-14B CMS model is currently training in the background. The RAG vector retrieval is live and querying your real PDF database, but the answer generation is simulated to keep the GPU 100% free.*"
+                f"*Note: The Llama-3.1-8B CMS model is currently training on SageMaker. The RAG vector retrieval is live and querying your real PDF database, but the answer generation is simulated to keep the GPU 100% free.*"
             )
         else:
             response = (
-                f"**[Demo Mode — Qwen-14B CMS Response Simulation]**\n\n"
+                f"**[Demo Mode — Llama-3.1-8B CMS Response Simulation]**\n\n"
                 f"No relevant policy context was found in the database to answer the question: *\"{query}\"*\n\n"
-                f"*Note: The Qwen-14B CMS model is currently training in the background. The response generation is simulated to keep the GPU 100% free.*"
+                f"*Note: The Llama-3.1-8B CMS model is currently training on SageMaker. The response generation is simulated to keep the GPU 100% free.*"
             )
             
         return jsonify({
@@ -344,16 +368,16 @@ def handle_generate():
         })
         
     try:
-        tok = tokenizer_dict[model_name]
-        
-        # Build chat message templates
-        chat_messages = []
-        chat_messages.append({"role": "system", "content": SYSTEM_PROMPT})
+        # Build prompt manually using Llama 3.1 special tokens
+        prompt = "<|begin_of_text|>"
+        prompt += f"<|start_header_id|>system<|end_header_id|>\n{SYSTEM_PROMPT}<|eot_id|>\n"
         
         # Append message history (excluding the very last user query, which we append with RAG contexts)
-        # Limit history to the last 10 messages (5 turns) to prevent context limit overflow and VRAM issues
+        # Limit history to the last 10 messages (5 turns) to prevent context limit overflow
         for msg in messages[:-1][-10:]:
-            chat_messages.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            prompt += f"<|start_header_id|>{role}<|end_header_id|>\n{content}<|eot_id|>\n"
             
         if use_rag:
             # Filter out contexts with score < -1.0 to avoid low-quality or irrelevant context
@@ -364,35 +388,19 @@ def handle_generate():
                 pid = ctx.get('paragraph_id', '')
                 doc = ctx.get('source_doc', '')
                 text = ctx.get('text', '')
-                context_parts.append(f"Document: {doc}\nContent:\n{text}")
+                context_parts.append(f"Paragraph ID: {pid}\nDocument: {doc}\nContent:\n{text}")
             context_str = "\n\n".join(context_parts)
             
-            user_content = f"Contexts:\n{context_str}\n\nQuestion: {query}"
+            user_content = f"Context:\n{context_str}\n\nQuestion: {query}"
         else:
             user_content = query
             
-        chat_messages.append({"role": "user", "content": user_content})
-        
-        prompt = tok.apply_chat_template(
-            chat_messages,
-            tokenize=False,
-            add_generation_prompt=True
-        )
-        
-        # Configure vLLM generation parameters
-        from vllm import SamplingParams
-        sampling_params = SamplingParams(
-            temperature=0.3,
-            top_p=0.9,
-            max_tokens=512,
-            repetition_penalty=1.2,
-            stop_token_ids=[tok.eos_token_id]
-        )
+        prompt += f"<|start_header_id|>user<|end_header_id|>\n{user_content}<|eot_id|>\n"
+        prompt += "<|start_header_id|>assistant<|end_header_id|>\n"
         
         t_start = time.time()
-        # Generate answer using vLLM engine
-        outputs = llm_engine.generate([prompt], sampling_params, use_tqdm=False)
-        response = outputs[0].outputs[0].text.strip()
+        # Generate answer using SageMaker endpoint client
+        response = call_sagemaker_endpoint(prompt, max_tokens=512, temperature=0.3)
         elapsed_time = time.time() - t_start
         
         return jsonify({
@@ -417,13 +425,86 @@ def serve_document(filename):
         print(f"Error serving document {filename}: {e}", flush=True)
         return jsonify({"error": f"File not found: {filename}"}), 404
 
-@app.route("/api/metrics", methods=["GET"])
-def handle_metrics():
-    log_path = "data/pipeline_step6_training.log"
+def get_training_metrics_from_cloudwatch(job_name):
+    cw = boto3.client("logs", region_name=AWS_REGION)
+    log_group = "/aws/sagemaker/TrainingJobs"
+    
+    # 1. Describe log streams to find the stream for this job
+    try:
+        streams = cw.describe_log_streams(
+            logGroupName=log_group,
+            logStreamNamePrefix=job_name,
+            limit=1
+        )
+        if not streams.get("logStreams"):
+            return [], [], 0
+        stream_name = streams["logStreams"][0]["logStreamName"]
+    except Exception:
+        return [], [], 0
+        
+    # 2. Get log events
     train_history = []
     eval_history = []
+    completed_steps = 0
+    
+    try:
+        events = cw.get_log_events(
+            logGroupName=log_group,
+            logStreamName=stream_name,
+            limit=1000, # Get log lines to scan for progress
+            startFromHead=True
+        )
+        
+        # SFTTrainer logs like:
+        # {'loss': 2.4931, 'grad_norm': 1.0162, 'learning_rate': 0.0001, 'epoch': 0.01}
+        # tqdm output like: 0%|          | 8/1722 [02:28<8:48:59, 18.52s/it]
+        tqdm_pattern = re.compile(r"(\d+)%\|.*\|\s+(\d+)/(\d+)")
+        dict_pattern = re.compile(r"\{'loss':\s*.*\}")
+        eval_pattern = re.compile(r"\{'eval_loss':\s*.*\}")
+        
+        for event in events.get("events", []):
+            message = event.get("message", "")
+            
+            # Check for steps count
+            tqdm_match = tqdm_pattern.search(message)
+            if tqdm_match:
+                completed_steps = int(tqdm_match.group(2))
+                
+            # Check for training loss dict
+            dict_match = dict_pattern.search(message)
+            if dict_match:
+                try:
+                    data = ast.literal_eval(dict_match.group(0))
+                    train_history.append({
+                        'step': len(train_history) * 5 + 5, # SFTTrainer logs every 5 steps
+                        'loss': float(data['loss']),
+                        'epoch': float(data['epoch']),
+                        'lr': float(data['learning_rate'])
+                    })
+                except Exception:
+                    pass
+                    
+            # Check for eval loss
+            eval_match = eval_pattern.search(message)
+            if eval_match:
+                try:
+                    data = ast.literal_eval(eval_match.group(0))
+                    eval_history.append({
+                        'step': len(train_history) * 5,
+                        'eval_loss': float(data['eval_loss']),
+                        'epoch': float(data['epoch']),
+                    })
+                except Exception:
+                    pass
+    except Exception:
+        pass
+        
+    return train_history, eval_history, completed_steps
+
+@app.route("/api/metrics", methods=["GET"])
+def handle_metrics():
     summary = {
-        "total_steps": 2406,
+        "total_steps": 2296,
         "completed_steps": 0,
         "progress_pct": 0.0,
         "initial_loss": 0.0,
@@ -431,61 +512,57 @@ def handle_metrics():
         "final_eval_loss": 0.0,
         "status": "idle"
     }
+    train_history = []
+    eval_history = []
     
-    if os.path.exists(log_path):
-        summary["status"] = "running"
-        dict_pattern = re.compile(r"\{'[a-z_]+':\s*.*\}")
-        try:
-            with open(log_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    match = dict_pattern.search(line)
-                    if match:
-                        try:
-                            data = ast.literal_eval(match.group(0))
-                            if 'loss' in data:
-                                train_history.append({
-                                    'step': len(train_history) * 10 + 10,
-                                    'loss': float(data['loss']),
-                                    'epoch': float(data['epoch']),
-                                    'lr': float(data['learning_rate'])
-                                })
-                            elif 'eval_loss' in data:
-                                epoch = float(data['epoch'])
-                                step = round(epoch * (2406 / 3.0))
-                                eval_history.append({
-                                    'step': step,
-                                    'eval_loss': float(data['eval_loss']),
-                                    'epoch': epoch,
-                                    'eval_runtime': float(data.get('eval_runtime', 0.0))
-                                })
-                        except Exception:
-                            pass
-        except Exception as e:
-            print(f"Error parsing logs: {e}")
-            
-    if train_history:
-        summary["completed_steps"] = train_history[-1]['step']
-        summary["progress_pct"] = round((summary["completed_steps"] / summary["total_steps"]) * 100, 1)
-        summary["initial_loss"] = train_history[0]['loss']
-        summary["final_loss"] = train_history[-1]['loss']
+    if DEMO_MODE:
+        return jsonify({
+            "train_history": [],
+            "eval_history": [],
+            "summary": summary,
+            "demo_mode": True,
+            "models_loaded": []
+        })
         
-    if eval_history:
-        summary["final_eval_loss"] = eval_history[-1]['eval_loss']
+    try:
+        sm = boto3.client("sagemaker", region_name=AWS_REGION)
+        # Find latest training job matching prefix
+        jobs = sm.list_training_jobs(
+            NameContains="dwp-cmg-sft-",
+            SortBy="CreationTime",
+            SortOrder="Descending",
+            MaxResults=1
+        )
         
-    orchestrator_log = "data/orchestrator.log"
-    if os.path.exists(orchestrator_log):
-        try:
-            with open(orchestrator_log, 'r', encoding='utf-8') as f:
-                content = f.read()
-                if "End-to-End Pipeline Completed Successfully" in content:
-                    summary["status"] = "completed"
-                elif "Fine-tuning completed successfully" in content:
-                    summary["status"] = "completed"
-                elif "Error:" in content or "failed" in content:
-                    summary["status"] = "failed"
-        except Exception:
-            pass
+        if jobs.get("TrainingJobSummaries"):
+            job_summary = jobs["TrainingJobSummaries"][0]
+            job_name = job_summary["TrainingJobName"]
+            desc = sm.describe_training_job(TrainingJobName=job_name)
             
+            # Map status
+            sm_status = desc["TrainingJobStatus"]
+            if sm_status == "InProgress":
+                summary["status"] = "running"
+            elif sm_status == "Completed":
+                summary["status"] = "completed"
+            elif sm_status == "Failed":
+                summary["status"] = "failed"
+            else:
+                summary["status"] = sm_status.lower()
+                
+            # Get metrics from CloudWatch logs
+            train_history, eval_history, completed_steps = get_training_metrics_from_cloudwatch(job_name)
+            summary["completed_steps"] = completed_steps
+            summary["progress_pct"] = round((completed_steps / summary["total_steps"]) * 100, 1)
+            
+            if train_history:
+                summary["initial_loss"] = train_history[0]['loss']
+                summary["final_loss"] = train_history[-1]['loss']
+            if eval_history:
+                summary["final_eval_loss"] = eval_history[-1]['eval_loss']
+    except Exception as e:
+        print(f"Error fetching metrics from SageMaker/CloudWatch: {e}")
+        
     return jsonify({
         "train_history": train_history,
         "eval_history": eval_history,

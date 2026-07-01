@@ -1,6 +1,6 @@
-torch
-transformers
-peft
-datasets
-pymupdf
-accelerate
+# Run 2: bfloat16 training — bitsandbytes removed (no 4-bit quantization)
+transformers==4.45.2
+tokenizers==0.20.3
+peft==0.10.0
+trl==0.9.4
+accelerate==0.34.2

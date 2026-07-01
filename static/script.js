@@ -615,9 +615,9 @@ document.addEventListener("DOMContentLoaded", () => {
                 const summary = data.summary || {};
                 
                 // Determine model availability and mode based on actual backend operational state
-                const has14bTuned = !data.demo_mode && data.models_loaded && data.models_loaded.includes("qwen_14b_tuned");
-                modeText.textContent = has14bTuned ? "Inference Active (14B)" : "Demo Mode (Inference Simulated)";
-                modeText.style.color = has14bTuned ? "#34d399" : "#c084fc";
+                const hasActiveModel = !data.demo_mode && data.models_loaded && (data.models_loaded.includes("dwp-cmg-llama-8b-endpoint-v2") || data.models_loaded.includes("qwen_14b_tuned"));
+                modeText.textContent = hasActiveModel ? "Inference Active (Llama-8B)" : "Demo Mode (Inference Simulated)";
+                modeText.style.color = hasActiveModel ? "#34d399" : "#c084fc";
                 if (progressText) {
                     progressText.textContent = `${summary.completed_steps || 0}/${summary.total_steps || 2406}`;
                 }
