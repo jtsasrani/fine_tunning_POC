@@ -282,7 +282,8 @@ def initialize_models():
             model=primary_model_path,
             quantization="bitsandbytes",
             gpu_memory_utilization=0.85,
-            max_model_len=4096
+            max_model_len=4096,
+            enforce_eager=True
         )
         # Populate model_dict to keep API checks and metrics working properly
         model_dict["qwen_14b_tuned"] = True
@@ -470,6 +471,109 @@ def handle_retrieve():
         print(f"Error in retrieve: {e}", flush=True)
         return jsonify({"error": str(e)}), 500
 
+def build_truncated_llama_prompt(query, messages, contexts, use_rag):
+    # System prompt
+    sys_part = f"<|start_header_id|>system<|end_header_id|>\n{LLAMA_SYSTEM_PROMPT}<|eot_id|>\n"
+    
+    # Target under 1000 tokens to leave a safe margin under SageMaker's 1024 token limit
+    MAX_TOKENS = 1000
+    
+    # Calculate tokens of fixed parts (system prompt + query wrapper + begin/end tokens)
+    fixed_text = "<|begin_of_text|>" + sys_part + "<|start_header_id|>user<|end_header_id|>\n"
+    if use_rag:
+        fixed_text += "Context:\n\n\nQuestion: " + query + "<|eot_id|>\n<|start_header_id|>assistant<|end_header_id|>\n"
+    else:
+        fixed_text += query + "<|eot_id|>\n<|start_header_id|>assistant<|end_header_id|>\n"
+        
+    def count_tokens(text):
+        if embed_tokenizer:
+            try:
+                return len(embed_tokenizer.encode(text))
+            except Exception:
+                pass
+        return len(text) // 3.5  # Rough approximation fallback (1 token ~ 3.5 chars)
+        
+    fixed_tokens = count_tokens(fixed_text)
+    available_tokens = MAX_TOKENS - fixed_tokens
+    
+    # Minimum budget fallback
+    if available_tokens < 200:
+        available_tokens = 200
+        
+    # Allocate 70% for RAG contexts, 30% for history
+    context_budget = int(available_tokens * 0.70)
+    history_budget = available_tokens - context_budget
+    
+    # 1. Process and trim RAG contexts
+    context_str = ""
+    if use_rag and contexts:
+        filtered_contexts = [ctx for ctx in contexts if ctx.get('score', 0.0) >= -1.0]
+        context_parts = []
+        current_context_tokens = 0
+        
+        for ctx in filtered_contexts:
+            pid = ctx.get('paragraph_id', '')
+            doc = ctx.get('source_doc', '')
+            text = ctx.get('text', '')
+            part_text = f"Paragraph ID: {pid}\nDocument: {doc}\nContent:\n{text}\n\n"
+            part_tokens = count_tokens(part_text)
+            
+            if current_context_tokens + part_tokens <= context_budget:
+                context_parts.append(part_text)
+                current_context_tokens += part_tokens
+            else:
+                # Truncate text of this context to fit remaining budget
+                remaining_budget = context_budget - current_context_tokens
+                if remaining_budget > 50:
+                    words = text.split()
+                    trimmed_text = ""
+                    for word in words:
+                        test_text = trimmed_text + " " + word if trimmed_text else word
+                        test_part = f"Paragraph ID: {pid}\nDocument: {doc}\nContent:\n{test_text}..."
+                        test_tokens = count_tokens(test_part)
+                        if test_tokens <= remaining_budget:
+                            trimmed_text = test_text
+                        else:
+                            break
+                    if trimmed_text:
+                        part_trimmed = f"Paragraph ID: {pid}\nDocument: {doc}\nContent:\n{trimmed_text}...\n\n"
+                        context_parts.append(part_trimmed)
+                        current_context_tokens += count_tokens(part_trimmed)
+                break
+        context_str = "".join(context_parts).strip()
+        
+    # 2. Process and trim history
+    history_parts = []
+    current_history_tokens = 0
+    clean_history = [m for m in messages[:-1] if m.get("role") in ["user", "assistant"]]
+    
+    # Iterate backwards through last 10 messages
+    for msg in reversed(clean_history[-10:]):
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        msg_text = f"<|start_header_id|>{role}<|end_header_id|>\n{content}<|eot_id|>\n"
+        msg_tokens = count_tokens(msg_text)
+        
+        if current_history_tokens + msg_tokens <= history_budget:
+            history_parts.insert(0, msg_text)  # Keep chronological order
+            current_history_tokens += msg_tokens
+        else:
+            break
+            
+    history_str = "".join(history_parts)
+    
+    # Assemble prompt
+    prompt = "<|begin_of_text|>" + sys_part + history_str
+    if use_rag and context_str:
+        user_content = f"Context:\n{context_str}\n\nQuestion: {query}"
+    else:
+        user_content = query
+        
+    prompt += f"<|start_header_id|>user<|end_header_id|>\n{user_content}<|eot_id|>\n"
+    prompt += "<|start_header_id|>assistant<|end_header_id|>\n"
+    
+    return prompt
+
 @app.route("/api/query/generate", methods=["POST"])
 def handle_generate():
     auth_err = check_auth()
@@ -562,36 +666,8 @@ def handle_generate():
         
     try:
         if model_name == "dwp-cmg-llama-8b-endpoint-v2":
-            # Build prompt manually using Llama 3.1 special tokens
-            prompt = "<|begin_of_text|>"
-            # Option C: Use the Llama-specific system prompt that mandates full citation format
-            prompt += f"<|start_header_id|>system<|end_header_id|>\n{LLAMA_SYSTEM_PROMPT}<|eot_id|>\n"
-            
-            # Append message history (excluding the very last user query, which we append with RAG contexts)
-            # Limit history to the last 10 messages (5 turns) to prevent context limit overflow
-            for msg in messages[:-1][-10:]:
-                role = msg.get("role", "user")
-                content = msg.get("content", "")
-                prompt += f"<|start_header_id|>{role}<|end_header_id|>\n{content}<|eot_id|>\n"
-                
-            if use_rag:
-                # Filter out contexts with score < -1.0 to avoid low-quality or irrelevant context
-                filtered_contexts = [ctx for ctx in contexts if ctx.get('score', 0.0) >= -1.0]
-                
-                context_parts = []
-                for ctx in filtered_contexts:
-                    pid = ctx.get('paragraph_id', '')
-                    doc = ctx.get('source_doc', '')
-                    text = ctx.get('text', '')
-                    context_parts.append(f"Paragraph ID: {pid}\nDocument: {doc}\nContent:\n{text}")
-                context_str = "\n\n".join(context_parts)
-                
-                user_content = f"Context:\n{context_str}\n\nQuestion: {query}"
-            else:
-                user_content = query
-                
-            prompt += f"<|start_header_id|>user<|end_header_id|>\n{user_content}<|eot_id|>\n"
-            prompt += "<|start_header_id|>assistant<|end_header_id|>\n"
+            # Build prompt dynamically using token budgeting to stay under SageMaker's 1024 token limit
+            prompt = build_truncated_llama_prompt(query, messages, contexts, use_rag)
             
             t_start = time.time()
             response = call_sagemaker_endpoint(prompt, max_tokens=512, temperature=0.3)
