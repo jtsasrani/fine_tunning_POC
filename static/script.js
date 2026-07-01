@@ -231,7 +231,8 @@ document.addEventListener("DOMContentLoaded", () => {
                     headers: authHeaders(),
                     body: JSON.stringify({ 
                         query: text,
-                        history: conversationMessages
+                        history: conversationMessages,
+                        model: modelSelect.value
                     })
                 });
                 
@@ -615,9 +616,20 @@ document.addEventListener("DOMContentLoaded", () => {
                 const summary = data.summary || {};
                 
                 // Determine model availability and mode based on actual backend operational state
-                const has14bTuned = !data.demo_mode && data.models_loaded && data.models_loaded.includes("qwen_14b_tuned");
-                modeText.textContent = has14bTuned ? "Inference Active (14B)" : "Demo Mode (Inference Simulated)";
-                modeText.style.color = has14bTuned ? "#34d399" : "#c084fc";
+                const activeModel = modelSelect ? modelSelect.value : "qwen_14b_tuned";
+                let hasActiveModel = false;
+                let displayName = "";
+                
+                if (activeModel === "qwen_14b_tuned") {
+                    hasActiveModel = !data.demo_mode && data.models_loaded && data.models_loaded.includes("qwen_14b_tuned");
+                    displayName = "Qwen-14B";
+                } else if (activeModel === "dwp-cmg-llama-8b-endpoint-v2") {
+                    hasActiveModel = !data.demo_mode && data.models_loaded && data.models_loaded.includes("dwp-cmg-llama-8b-endpoint-v2");
+                    displayName = "Llama-8B";
+                }
+                
+                modeText.textContent = hasActiveModel ? `Inference Active (${displayName})` : `Demo Mode (${displayName} Simulated)`;
+                modeText.style.color = hasActiveModel ? "#34d399" : "#c084fc";
                 if (progressText) {
                     progressText.textContent = `${summary.completed_steps || 0}/${summary.total_steps || 2406}`;
                 }
@@ -644,6 +656,13 @@ document.addEventListener("DOMContentLoaded", () => {
             modeText.style.color = "#f43f5e";
         }
     };
+
+    // Listen for model select dropdown changes to update system status in real-time
+    if (modelSelect) {
+        modelSelect.addEventListener("change", () => {
+            updateSystemStatusInfo();
+        });
+    }
 
     // Run status check immediately and then every 20 seconds
     updateSystemStatusInfo();

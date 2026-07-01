@@ -1,5 +1,7 @@
 import os
 import sys
+import boto3
+import json
 
 # Ensure vLLM/Triton binaries like ninja can be found in the virtual environment's bin folder
 venv_bin = "/opt/pytorch/bin"
@@ -38,6 +40,11 @@ reranker = None
 tokenizer_dict = {}
 model_dict = {}
 llm_engine = None
+
+# SageMaker configuration
+SAGEMAKER_ENDPOINT_NAME = "dwp-cmg-llama-8b-endpoint-v2"
+AWS_REGION = "us-east-1"
+sagemaker_runtime = None
 
 # System prompt for RAG answers (aligned with Phase 3 Training)
 SYSTEM_PROMPT = (
@@ -121,6 +128,48 @@ def retrieve_context_hybrid_rerank(query, top_k=3):
             "score": float(score)
         })
     return retrieved
+def get_sagemaker_runtime_client():
+    global sagemaker_runtime
+    if sagemaker_runtime is None:
+        sagemaker_runtime = boto3.client("sagemaker-runtime", region_name=AWS_REGION)
+    return sagemaker_runtime
+
+def call_sagemaker_endpoint(prompt, max_tokens=512, temperature=0.3):
+    client = get_sagemaker_runtime_client()
+    # TGI container parameters
+    payload = {
+        "inputs": prompt,
+        "parameters": {
+            "max_new_tokens": max_tokens,
+            "temperature": temperature,
+            "top_p": 0.9,
+            "repetition_penalty": 1.2,
+            "stop": ["<|eot_id|>"]
+        }
+    }
+    
+    try:
+        response = client.invoke_endpoint(
+            EndpointName=SAGEMAKER_ENDPOINT_NAME,
+            ContentType="application/json",
+            Body=json.dumps(payload)
+        )
+        result = json.loads(response["Body"].read().decode("utf-8"))
+        
+        # TGI returns [{"generated_text": "..."}] or {"generated_text": "..."}
+        if isinstance(result, list) and len(result) > 0:
+            gen_text = result[0].get("generated_text", "")
+        elif isinstance(result, dict):
+            gen_text = result.get("generated_text", "")
+        else:
+            gen_text = str(result)
+            
+        if gen_text.startswith(prompt):
+            gen_text = gen_text[len(prompt):].strip()
+        return gen_text.strip()
+    except Exception as e:
+        print(f"Error calling SageMaker endpoint: {e}", flush=True)
+        raise e
 
 def initialize_models():
     global db_data, faiss_index, embed_tokenizer, embed_model, reranker, tokenizer_dict, model_dict, llm_engine, DEMO_MODE
@@ -145,6 +194,19 @@ def initialize_models():
     
     reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2", device=device)
     
+    print(f"Verifying SageMaker Endpoint '{SAGEMAKER_ENDPOINT_NAME}'...", flush=True)
+    try:
+        client = boto3.client("sagemaker-runtime", region_name=AWS_REGION)
+        client.invoke_endpoint(
+            EndpointName=SAGEMAKER_ENDPOINT_NAME,
+            ContentType="application/json",
+            Body=json.dumps({"inputs": "Hello", "parameters": {"max_new_tokens": 1}})
+        )
+        model_dict[SAGEMAKER_ENDPOINT_NAME] = True
+        print("SageMaker Endpoint is active and registered in dashboard.", flush=True)
+    except Exception as inv_e:
+        print(f"Warning: Could not connect to SageMaker endpoint: {inv_e}. Dashboard will run in simulation mode for Llama-8B.", flush=True)
+
     primary_model_path = os.path.abspath("./trained_models/qwen-14b-cms-qlora_merged")
     
     # Check if the primary local models folders actually exist. If not, auto-force DEMO_MODE
@@ -206,6 +268,7 @@ def handle_retrieve():
     data = request.get_json() or {}
     query = data.get("query", "").strip()
     history = data.get("history", []) or data.get("messages", [])
+    model_name = data.get("model", "qwen_14b_tuned").strip()
     if not query:
         return jsonify({"error": "Empty query provided."}), 400
         
@@ -218,44 +281,73 @@ def handle_retrieve():
         clean_history = [m for m in history if m.get("role") in ["user", "assistant"]]
         
         # We only condense if there is active history beyond the current query
-        if not DEMO_MODE and llm_engine and len(clean_history) > 1:
-            try:
-                prior_history = clean_history[:-1]
-                
-                system_prompt = (
-                    "You are a search query optimizer for the DWP Child Maintenance Service (CMS). "
-                    "Analyze the conversation history and the new follow-up question, and output a single, "
-                    "concise standalone search query in plain text. "
-                    "The search query must combine the context from the history and the new question to retrieve relevant policy documents. "
-                    "Do not write any introductory text, explanations, or conversational responses. Only output the rephrased query."
-                )
-                
-                temp_messages = [{"role": "system", "content": system_prompt}]
-                for msg in prior_history[-4:]: # Limit to last 2 turns to keep it extremely fast
-                    temp_messages.append({"role": msg.get("role"), "content": msg.get("content")})
-                temp_messages.append({"role": "user", "content": f"Rephrase this follow-up question to a standalone search query: {query}"})
-                
-                tok = tokenizer_dict.get("qwen_14b_tuned")
-                if tok:
-                    prompt = tok.apply_chat_template(temp_messages, tokenize=False, add_generation_prompt=True)
-                    
-                    from vllm import SamplingParams
-                    sampling_params = SamplingParams(
-                        temperature=0.0,
-                        max_tokens=40,
-                        stop_token_ids=[tok.eos_token_id]
+        if not DEMO_MODE and len(clean_history) > 1:
+            if model_name == "dwp-cmg-llama-8b-endpoint-v2" and SAGEMAKER_ENDPOINT_NAME in model_dict:
+                try:
+                    prior_history = clean_history[:-1]
+                    system_prompt = (
+                        "You are a search query optimizer for the DWP Child Maintenance Service (CMS). "
+                        "Analyze the conversation history and the new follow-up question, and output a single, "
+                        "concise standalone search query in plain text. "
+                        "The search query must combine the context from the history and the new question to retrieve relevant policy documents. "
+                        "Do not write any introductory text, explanations, or conversational responses. Only output the rephrased query."
                     )
                     
-                    outputs = llm_engine.generate([prompt], sampling_params, use_tqdm=False)
-                    gen_text = outputs[0].outputs[0].text.strip()
-                    # Strip any wrapping quotes
+                    # Format Llama 3.1 prompt manually
+                    prompt = "<|begin_of_text|>"
+                    prompt += f"<|start_header_id|>system<|end_header_id|>\n{system_prompt}<|eot_id|>\n"
+                    for msg in prior_history[-4:]:
+                        role = msg.get("role", "user")
+                        content = msg.get("content", "")
+                        prompt += f"<|start_header_id|>{role}<|end_header_id|>\n{content}<|eot_id|>\n"
+                    prompt += f"<|start_header_id|>user<|end_header_id|>\nRephrase this follow-up question to a standalone search query: {query}<|eot_id|>\n"
+                    prompt += "<|start_header_id|>assistant<|end_header_id|>\n"
+                    
+                    gen_text = call_sagemaker_endpoint(prompt, max_tokens=40, temperature=0.0)
                     gen_text = gen_text.replace('"', '').replace("'", "").strip()
                     if gen_text:
                         search_query = gen_text
                         is_condensed = True
-                        print(f"[Query Condensation] Original: '{query}' -> Condensed: '{search_query}'", flush=True)
-            except Exception as cond_err:
-                print(f"[Query Condensation Error] Failed to condense, falling back to original query: {cond_err}", flush=True)
+                        print(f"[Query Condensation - Llama 8B] Original: '{query}' -> Condensed: '{search_query}'", flush=True)
+                except Exception as cond_err:
+                    print(f"[Query Condensation Error - Llama 8B] Failed to condense, falling back to original: {cond_err}", flush=True)
+            
+            elif model_name == "qwen_14b_tuned" and llm_engine:
+                try:
+                    prior_history = clean_history[:-1]
+                    system_prompt = (
+                        "You are a search query optimizer for the DWP Child Maintenance Service (CMS). "
+                        "Analyze the conversation history and the new follow-up question, and output a single, "
+                        "concise standalone search query in plain text. "
+                        "The search query must combine the context from the history and the new question to retrieve relevant policy documents. "
+                        "Do not write any introductory text, explanations, or conversational responses. Only output the rephrased query."
+                    )
+                    
+                    temp_messages = [{"role": "system", "content": system_prompt}]
+                    for msg in prior_history[-4:]:
+                        temp_messages.append({"role": msg.get("role"), "content": msg.get("content")})
+                    temp_messages.append({"role": "user", "content": f"Rephrase this follow-up question to a standalone search query: {query}"})
+                    
+                    tok = tokenizer_dict.get("qwen_14b_tuned")
+                    if tok:
+                        prompt = tok.apply_chat_template(temp_messages, tokenize=False, add_generation_prompt=True)
+                        
+                        from vllm import SamplingParams
+                        sampling_params = SamplingParams(
+                            temperature=0.0,
+                            max_tokens=40,
+                            stop_token_ids=[tok.eos_token_id]
+                        )
+                        
+                        outputs = llm_engine.generate([prompt], sampling_params, use_tqdm=False)
+                        gen_text = outputs[0].outputs[0].text.strip()
+                        gen_text = gen_text.replace('"', '').replace("'", "").strip()
+                        if gen_text:
+                            search_query = gen_text
+                            is_condensed = True
+                            print(f"[Query Condensation - Qwen 14B] Original: '{query}' -> Condensed: '{search_query}'", flush=True)
+                except Exception as cond_err:
+                    print(f"[Query Condensation Error - Qwen 14B] Failed to condense, falling back to original: {cond_err}", flush=True)
         
         retrieved_items = retrieve_context_hybrid_rerank(search_query, top_k=3)
         retrieval_time = time.time() - t0
@@ -303,8 +395,18 @@ def handle_generate():
     if not query or not model_name:
         return jsonify({"error": "Query/messages and model name are required."}), 400
         
-    # Check if we should simulate generation (if in DEMO_MODE or if the model isn't loaded)
-    if DEMO_MODE or model_name not in model_dict:
+    # Check if we should simulate generation
+    # Llama endpoint is served live if it is InService (in model_dict)
+    # Qwen local model is simulated if not loaded or if DEMO_MODE is active
+    is_simulated = False
+    if model_name == SAGEMAKER_ENDPOINT_NAME:
+        if SAGEMAKER_ENDPOINT_NAME not in model_dict:
+            is_simulated = True
+    else:
+        if DEMO_MODE or model_name not in model_dict:
+            is_simulated = True
+
+    if is_simulated:
         t0 = time.time()
         # Sleep slightly to simulate model generation speed
         time.sleep(1.2)
@@ -320,22 +422,41 @@ def handle_generate():
             sentences = re.split(r'(?<=[.!?])\s+', text)
             summary = " ".join(sentences[:3])
             
-            response = (
-                f"**[Demo Mode — Qwen-14B CMS Response Simulation]**\n\n"
-                f"Based on the official policy guide **{doc}** (Paragraph {pid}), the guidance states:\n\n"
-                f"> {summary}...\n\n"
-                f"**Retrieval Reference**:\n"
-                f"- Document: `{doc}`\n"
-                f"- Paragraph: `{pid}`\n"
-                f"- FAISS Rerank Score: `{best_chunk.get('score', 'N/A')}`\n\n"
-                f"*Note: The Qwen-14B CMS model is currently training in the background. The RAG vector retrieval is live and querying your real PDF database, but the answer generation is simulated to keep the GPU 100% free.*"
-            )
+            if model_name == "dwp-cmg-llama-8b-endpoint-v2":
+                response = (
+                    f"**[Demo Mode — Llama-3.1-8B CMS Response Simulation]**\n\n"
+                    f"Based on the official policy guide **{doc}** (Paragraph {pid}), the guidance states:\n\n"
+                    f"> {summary}...\n\n"
+                    f"**Retrieval Reference**:\n"
+                    f"- Document: `{doc}`\n"
+                    f"- Paragraph: `{pid}`\n"
+                    f"- FAISS Rerank Score: `{best_chunk.get('score', 'N/A')}`\n\n"
+                    f"*Note: The Llama-3.1-8B CMS model is currently training on SageMaker. The RAG vector retrieval is live and querying your real PDF database, but the answer generation is simulated to keep the GPU 100% free.*"
+                )
+            else:
+                response = (
+                    f"**[Demo Mode — Qwen-14B CMS Response Simulation]**\n\n"
+                    f"Based on the official policy guide **{doc}** (Paragraph {pid}), the guidance states:\n\n"
+                    f"> {summary}...\n\n"
+                    f"**Retrieval Reference**:\n"
+                    f"- Document: `{doc}`\n"
+                    f"- Paragraph: `{pid}`\n"
+                    f"- FAISS Rerank Score: `{best_chunk.get('score', 'N/A')}`\n\n"
+                    f"*Note: The Qwen-14B CMS model is currently training in the background. The RAG vector retrieval is live and querying your real PDF database, but the answer generation is simulated to keep the GPU 100% free.*"
+                )
         else:
-            response = (
-                f"**[Demo Mode — Qwen-14B CMS Response Simulation]**\n\n"
-                f"No relevant policy context was found in the database to answer the question: *\"{query}\"*\n\n"
-                f"*Note: The Qwen-14B CMS model is currently training in the background. The response generation is simulated to keep the GPU 100% free.*"
-            )
+            if model_name == "dwp-cmg-llama-8b-endpoint-v2":
+                response = (
+                    f"**[Demo Mode — Llama-3.1-8B CMS Response Simulation]**\n\n"
+                    f"No relevant policy context was found in the database to answer the question: *\"{query}\"*\n\n"
+                    f"*Note: The Llama-3.1-8B CMS model is currently training on SageMaker. The response generation is simulated to keep the GPU 100% free.*"
+                )
+            else:
+                response = (
+                    f"**[Demo Mode — Qwen-14B CMS Response Simulation]**\n\n"
+                    f"No relevant policy context was found in the database to answer the question: *\"{query}\"*\n\n"
+                    f"*Note: The Qwen-14B CMS model is currently training in the background. The response generation is simulated to keep the GPU 100% free.*"
+                )
             
         return jsonify({
             "model": model_name,
@@ -344,63 +465,105 @@ def handle_generate():
         })
         
     try:
-        tok = tokenizer_dict[model_name]
-        
-        # Build chat message templates
-        chat_messages = []
-        chat_messages.append({"role": "system", "content": SYSTEM_PROMPT})
-        
-        # Append message history (excluding the very last user query, which we append with RAG contexts)
-        # Limit history to the last 10 messages (5 turns) to prevent context limit overflow and VRAM issues
-        for msg in messages[:-1][-10:]:
-            chat_messages.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
+        if model_name == "dwp-cmg-llama-8b-endpoint-v2":
+            # Build prompt manually using Llama 3.1 special tokens
+            prompt = "<|begin_of_text|>"
+            prompt += f"<|start_header_id|>system<|end_header_id|>\n{SYSTEM_PROMPT}<|eot_id|>\n"
             
-        if use_rag:
-            # Filter out contexts with score < -1.0 to avoid low-quality or irrelevant context
-            filtered_contexts = [ctx for ctx in contexts if ctx.get('score', 0.0) >= -1.0]
+            # Append message history (excluding the very last user query, which we append with RAG contexts)
+            # Limit history to the last 10 messages (5 turns) to prevent context limit overflow
+            for msg in messages[:-1][-10:]:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                prompt += f"<|start_header_id|>{role}<|end_header_id|>\n{content}<|eot_id|>\n"
+                
+            if use_rag:
+                # Filter out contexts with score < -1.0 to avoid low-quality or irrelevant context
+                filtered_contexts = [ctx for ctx in contexts if ctx.get('score', 0.0) >= -1.0]
+                
+                context_parts = []
+                for ctx in filtered_contexts:
+                    pid = ctx.get('paragraph_id', '')
+                    doc = ctx.get('source_doc', '')
+                    text = ctx.get('text', '')
+                    context_parts.append(f"Paragraph ID: {pid}\nDocument: {doc}\nContent:\n{text}")
+                context_str = "\n\n".join(context_parts)
+                
+                user_content = f"Context:\n{context_str}\n\nQuestion: {query}"
+            else:
+                user_content = query
+                
+            prompt += f"<|start_header_id|>user<|end_header_id|>\n{user_content}<|eot_id|>\n"
+            prompt += "<|start_header_id|>assistant<|end_header_id|>\n"
             
-            context_parts = []
-            for ctx in filtered_contexts:
-                pid = ctx.get('paragraph_id', '')
-                doc = ctx.get('source_doc', '')
-                text = ctx.get('text', '')
-                context_parts.append(f"Document: {doc}\nContent:\n{text}")
-            context_str = "\n\n".join(context_parts)
+            t_start = time.time()
+            response = call_sagemaker_endpoint(prompt, max_tokens=512, temperature=0.3)
+            elapsed_time = time.time() - t_start
             
-            user_content = f"Contexts:\n{context_str}\n\nQuestion: {query}"
+            return jsonify({
+                "model": model_name,
+                "response": response,
+                "time": round(elapsed_time, 2)
+            })
+            
         else:
-            user_content = query
+            # Qwen 14B Tuned
+            tok = tokenizer_dict[model_name]
             
-        chat_messages.append({"role": "user", "content": user_content})
-        
-        prompt = tok.apply_chat_template(
-            chat_messages,
-            tokenize=False,
-            add_generation_prompt=True
-        )
-        
-        # Configure vLLM generation parameters
-        from vllm import SamplingParams
-        sampling_params = SamplingParams(
-            temperature=0.3,
-            top_p=0.9,
-            max_tokens=512,
-            repetition_penalty=1.2,
-            stop_token_ids=[tok.eos_token_id]
-        )
-        
-        t_start = time.time()
-        # Generate answer using vLLM engine
-        outputs = llm_engine.generate([prompt], sampling_params, use_tqdm=False)
-        response = outputs[0].outputs[0].text.strip()
-        elapsed_time = time.time() - t_start
-        
-        return jsonify({
-            "model": model_name,
-            "response": response,
-            "time": round(elapsed_time, 2)
-        })
-        
+            # Build chat message templates
+            chat_messages = []
+            chat_messages.append({"role": "system", "content": SYSTEM_PROMPT})
+            
+            # Append message history
+            for msg in messages[:-1][-10:]:
+                chat_messages.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
+                
+            if use_rag:
+                # Filter out contexts with score < -1.0 to avoid low-quality or irrelevant context
+                filtered_contexts = [ctx for ctx in contexts if ctx.get('score', 0.0) >= -1.0]
+                
+                context_parts = []
+                for ctx in filtered_contexts:
+                    pid = ctx.get('paragraph_id', '')
+                    doc = ctx.get('source_doc', '')
+                    text = ctx.get('text', '')
+                    context_parts.append(f"Document: {doc}\nContent:\n{text}")
+                context_str = "\n\n".join(context_parts)
+                
+                user_content = f"Contexts:\n{context_str}\n\nQuestion: {query}"
+            else:
+                user_content = query
+                
+            chat_messages.append({"role": "user", "content": user_content})
+            
+            prompt = tok.apply_chat_template(
+                chat_messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+            
+            # Configure vLLM generation parameters
+            from vllm import SamplingParams
+            sampling_params = SamplingParams(
+                temperature=0.3,
+                top_p=0.9,
+                max_tokens=512,
+                repetition_penalty=1.2,
+                stop_token_ids=[tok.eos_token_id]
+            )
+            
+            t_start = time.time()
+            # Generate answer using vLLM engine
+            outputs = llm_engine.generate([prompt], sampling_params, use_tqdm=False)
+            response = outputs[0].outputs[0].text.strip()
+            elapsed_time = time.time() - t_start
+            
+            return jsonify({
+                "model": model_name,
+                "response": response,
+                "time": round(elapsed_time, 2)
+            })
+            
     except Exception as e:
         print(f"Error in generate for {model_name}: {e}", flush=True)
         return jsonify({"error": str(e)}), 500
