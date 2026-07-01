@@ -41,17 +41,31 @@ tokenizer_dict = {}
 model_dict = {}
 llm_engine = None
 
+# Lookup map: paragraph_id -> source_doc  (built once at startup from db_data)
+paragraph_doc_map = {}
+
 # SageMaker configuration
 SAGEMAKER_ENDPOINT_NAME = "dwp-cmg-llama-8b-endpoint-v2"
 AWS_REGION = "us-east-1"
 sagemaker_runtime = None
 
-# System prompt for RAG answers (aligned with Phase 3 Training)
+# System prompt for RAG answers (aligned with Phase 3 Training) — used by Qwen-14B
 SYSTEM_PROMPT = (
     "You are an expert Decision Maker assistant for the DWP Child Maintenance Service (CMS). "
     "Answer questions accurately using only the provided policy context. "
     "Cite specific paragraph numbers, rules, and sections where present. "
     "If the context does not contain sufficient information, state this clearly."
+)
+
+# Enhanced system prompt for Llama-3.1-8B — mandates full citation format including document name
+LLAMA_SYSTEM_PROMPT = (
+    "You are an expert Decision Maker assistant for the DWP Child Maintenance Service (CMS). "
+    "Answer questions accurately using only the provided policy context. "
+    "When citing any paragraph or section, you MUST always include both the source document name "
+    "AND the paragraph number together in this exact format: (Document: <filename>, Paragraph: <id>). "
+    "Never mention a paragraph number without its source document name. "
+    "Never invent or guess document names — only use the document names explicitly provided in the Context section. "
+    "If the context does not contain sufficient information to answer, state this clearly."
 )
 
 def mean_pooling(model_output, attention_mask):
@@ -171,6 +185,34 @@ def call_sagemaker_endpoint(prompt, max_tokens=512, temperature=0.3):
         print(f"Error calling SageMaker endpoint: {e}", flush=True)
         raise e
 
+def enrich_llama_citations(text):
+    """
+    Option D: Post-process Llama-8B response text.
+    Finds bare 'Paragraph XXXXX' mentions that have no document context and
+    injects the source document name looked up from the pre-built paragraph_doc_map.
+    Example: 'Paragraph 56004' -> 'Paragraph 56004 (Document: Variance-Review.pdf)'
+    Leaves references that already contain a document name untouched.
+    """
+    if not paragraph_doc_map:
+        return text
+    
+    # Pattern: 'Paragraph' (case-insensitive) followed by a numeric ID
+    # Negative lookahead: skip if already followed by '(' or 'Document:' within 60 chars
+    para_pattern = re.compile(
+        r'(?i)(paragraph\s+)(\d{4,6})(?!\s*\(|[^.\n]{0,60}Document:)',
+        re.IGNORECASE
+    )
+    
+    def replace_match(m):
+        prefix = m.group(1)   # e.g. 'Paragraph '
+        pid = m.group(2)      # e.g. '56004'
+        doc = paragraph_doc_map.get(pid, "")
+        if doc:
+            return f"{prefix}{pid} (Document: {doc})"
+        return m.group(0)  # No mapping found — leave untouched
+    
+    return para_pattern.sub(replace_match, text)
+
 def initialize_models():
     global db_data, faiss_index, embed_tokenizer, embed_model, reranker, tokenizer_dict, model_dict, llm_engine, DEMO_MODE
     
@@ -182,6 +224,15 @@ def initialize_models():
         
     print("Loading vector database metadata...", flush=True)
     db_data = torch.load(db_file)
+    
+    # Build paragraph_id -> source_doc lookup map for Llama citation enrichment
+    global paragraph_doc_map
+    paragraph_doc_map = {
+        chunk.get("paragraph_id", ""): chunk.get("source_doc", "")
+        for chunk in db_data.get("chunks", [])
+        if chunk.get("paragraph_id")
+    }
+    print(f"Built paragraph_doc_map with {len(paragraph_doc_map)} entries.", flush=True)
     
     print("Loading FAISS index...", flush=True)
     faiss_index = faiss.read_index(faiss_file)
@@ -269,11 +320,35 @@ def handle_retrieve():
     query = data.get("query", "").strip()
     history = data.get("history", []) or data.get("messages", [])
     model_name = data.get("model", "qwen_14b_tuned").strip()
+    # Fix 2: Prior retrieved contexts from the previous turn (sent by the frontend)
+    prior_contexts = data.get("prior_contexts", []) or []
     if not query:
         return jsonify({"error": "Empty query provided."}), 400
         
     try:
         t0 = time.time()
+        
+        # ---------------------------------------------------------------
+        # Fix 2: Build a compact prior-context hint string.
+        # We include paragraph ID, source doc, and a 300-char snippet of
+        # the text so the condensation LLM can reuse the exact policy
+        # vocabulary when rephrasing the follow-up query.
+        # ---------------------------------------------------------------
+        prior_context_hint = ""
+        if prior_contexts:
+            hint_parts = []
+            for pc in prior_contexts[:3]:  # Cap at 3 to stay within token budget
+                pid  = pc.get("paragraph_id", "")
+                doc  = pc.get("source_doc", "")
+                text = pc.get("text", "")[:300].strip()
+                if pid or doc:
+                    hint_parts.append(f"[Paragraph {pid} | {doc}]: {text}")
+            if hint_parts:
+                prior_context_hint = (
+                    "\n\nThe following policy passages were retrieved in the previous turn "
+                    "— use their exact terminology when rephrasing the new query:\n"
+                    + "\n".join(hint_parts)
+                )
         
         # Query Condensation for multi-turn RAG
         search_query = query
@@ -282,28 +357,51 @@ def handle_retrieve():
         
         # We only condense if there is active history beyond the current query
         if not DEMO_MODE and len(clean_history) > 1:
+            # -------------------------------------------------------------------
+            # Fix 1: Hardened condensation system prompt.
+            # Key improvements over the old prompt:
+            #  - Mandates a SINGLE standalone question (no preamble, no list)
+            #  - Explicitly requires preservation of DWP/CMS domain vocabulary
+            #  - Requires resolution of all pronouns using conversation history
+            #  - Requires retention of all numeric values, names, categories
+            #  - Forbids conversational filler or hedging language
+            # -------------------------------------------------------------------
+            CONDENSATION_SYSTEM_PROMPT = (
+                "You are a search query optimizer for the DWP Child Maintenance Service (CMS) RAG system. "
+                "Your task is to rewrite a follow-up question into a single, standalone search query "
+                "that can retrieve relevant CMS policy documents from a vector database without any conversation context. "
+                "Rules you MUST follow:\n"
+                "1. Output ONLY the rephrased query — no introductory text, no explanations, no bullet points.\n"
+                "2. Resolve ALL pronouns (they, it, that, this, their, etc.) using the conversation history.\n"
+                "3. Preserve ALL specific DWP/CMS terminology exactly as-is (e.g. Non-Resident Parent, NRP, "
+                "Qualifying Child, PWC, Flat Rate, Reduced Rate, Gross Income, Shared Care, Variations, "
+                "Maintenance Calculation, etc.).\n"
+                "4. Retain ALL numeric values, monetary amounts, percentages, dates, and case-specific facts.\n"
+                "5. Make the query specific and rich enough that a semantic search engine can match it to "
+                "the correct CMS policy paragraphs.\n"
+                "6. Do NOT add assumptions beyond what is in the conversation history."
+            )
+            
             if model_name == "dwp-cmg-llama-8b-endpoint-v2" and SAGEMAKER_ENDPOINT_NAME in model_dict:
                 try:
                     prior_history = clean_history[:-1]
-                    system_prompt = (
-                        "You are a search query optimizer for the DWP Child Maintenance Service (CMS). "
-                        "Analyze the conversation history and the new follow-up question, and output a single, "
-                        "concise standalone search query in plain text. "
-                        "The search query must combine the context from the history and the new question to retrieve relevant policy documents. "
-                        "Do not write any introductory text, explanations, or conversational responses. Only output the rephrased query."
-                    )
                     
                     # Format Llama 3.1 prompt manually
                     prompt = "<|begin_of_text|>"
-                    prompt += f"<|start_header_id|>system<|end_header_id|>\n{system_prompt}<|eot_id|>\n"
+                    prompt += f"<|start_header_id|>system<|end_header_id|>\n{CONDENSATION_SYSTEM_PROMPT}<|eot_id|>\n"
                     for msg in prior_history[-4:]:
                         role = msg.get("role", "user")
                         content = msg.get("content", "")
                         prompt += f"<|start_header_id|>{role}<|end_header_id|>\n{content}<|eot_id|>\n"
-                    prompt += f"<|start_header_id|>user<|end_header_id|>\nRephrase this follow-up question to a standalone search query: {query}<|eot_id|>\n"
+                    # Fix 2: Inject prior context hint into the user condensation request
+                    condensation_user_msg = (
+                        f"Rephrase this follow-up question into a standalone CMS policy search query: {query}"
+                        f"{prior_context_hint}"
+                    )
+                    prompt += f"<|start_header_id|>user<|end_header_id|>\n{condensation_user_msg}<|eot_id|>\n"
                     prompt += "<|start_header_id|>assistant<|end_header_id|>\n"
                     
-                    gen_text = call_sagemaker_endpoint(prompt, max_tokens=40, temperature=0.0)
+                    gen_text = call_sagemaker_endpoint(prompt, max_tokens=60, temperature=0.0)
                     gen_text = gen_text.replace('"', '').replace("'", "").strip()
                     if gen_text:
                         search_query = gen_text
@@ -315,18 +413,16 @@ def handle_retrieve():
             elif model_name == "qwen_14b_tuned" and llm_engine:
                 try:
                     prior_history = clean_history[:-1]
-                    system_prompt = (
-                        "You are a search query optimizer for the DWP Child Maintenance Service (CMS). "
-                        "Analyze the conversation history and the new follow-up question, and output a single, "
-                        "concise standalone search query in plain text. "
-                        "The search query must combine the context from the history and the new question to retrieve relevant policy documents. "
-                        "Do not write any introductory text, explanations, or conversational responses. Only output the rephrased query."
-                    )
                     
-                    temp_messages = [{"role": "system", "content": system_prompt}]
+                    temp_messages = [{"role": "system", "content": CONDENSATION_SYSTEM_PROMPT}]
                     for msg in prior_history[-4:]:
                         temp_messages.append({"role": msg.get("role"), "content": msg.get("content")})
-                    temp_messages.append({"role": "user", "content": f"Rephrase this follow-up question to a standalone search query: {query}"})
+                    # Fix 2: Inject prior context hint into the user condensation request
+                    condensation_user_msg = (
+                        f"Rephrase this follow-up question into a standalone CMS policy search query: {query}"
+                        f"{prior_context_hint}"
+                    )
+                    temp_messages.append({"role": "user", "content": condensation_user_msg})
                     
                     tok = tokenizer_dict.get("qwen_14b_tuned")
                     if tok:
@@ -335,7 +431,7 @@ def handle_retrieve():
                         from vllm import SamplingParams
                         sampling_params = SamplingParams(
                             temperature=0.0,
-                            max_tokens=40,
+                            max_tokens=60,
                             stop_token_ids=[tok.eos_token_id]
                         )
                         
@@ -468,7 +564,8 @@ def handle_generate():
         if model_name == "dwp-cmg-llama-8b-endpoint-v2":
             # Build prompt manually using Llama 3.1 special tokens
             prompt = "<|begin_of_text|>"
-            prompt += f"<|start_header_id|>system<|end_header_id|>\n{SYSTEM_PROMPT}<|eot_id|>\n"
+            # Option C: Use the Llama-specific system prompt that mandates full citation format
+            prompt += f"<|start_header_id|>system<|end_header_id|>\n{LLAMA_SYSTEM_PROMPT}<|eot_id|>\n"
             
             # Append message history (excluding the very last user query, which we append with RAG contexts)
             # Limit history to the last 10 messages (5 turns) to prevent context limit overflow
@@ -499,6 +596,10 @@ def handle_generate():
             t_start = time.time()
             response = call_sagemaker_endpoint(prompt, max_tokens=512, temperature=0.3)
             elapsed_time = time.time() - t_start
+            
+            # Option D: Deterministic citation enrichment — inject document name next to
+            # any bare paragraph IDs the model forgot to annotate with a document source.
+            response = enrich_llama_citations(response)
             
             return jsonify({
                 "model": model_name,

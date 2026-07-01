@@ -13,6 +13,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // Conversation History Storage
     let conversationMessages = [];
+    // Fix 2: Tracks the retrieved RAG chunks from the last turn so the backend
+    // can anchor the next condensed query in real policy document vocabulary.
+    let lastRetrievedContexts = [];
     
     // Chart Instance reference
     let convergenceChart = null;
@@ -115,6 +118,8 @@ document.addEventListener("DOMContentLoaded", () => {
     if (resetChatBtn) {
         resetChatBtn.addEventListener("click", () => {
             conversationMessages = [];
+            lastRetrievedContexts = [];
+
             // Remove message bubbles
             const bubbles = chatBox.querySelectorAll(".message-bubble");
             bubbles.forEach(b => b.remove());
@@ -232,13 +237,18 @@ document.addEventListener("DOMContentLoaded", () => {
                     body: JSON.stringify({ 
                         query: text,
                         history: conversationMessages,
-                        model: modelSelect.value
+                        model: modelSelect.value,
+                        // Fix 2: Send last turn's retrieved chunks so the backend can
+                        // anchor the condensed query in real policy document vocabulary
+                        prior_contexts: lastRetrievedContexts
                     })
                 });
                 
                 if (retrieveResponse.ok) {
                     const retrieveResult = await retrieveResponse.json();
                     contexts = retrieveResult.retrieved_contexts || [];
+                    // Fix 2: Remember this turn's contexts for the next turn
+                    lastRetrievedContexts = contexts;
                     renderCitations(contexts);
                 } else {
                     console.error("Context retrieval failed.");
