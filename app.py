@@ -294,6 +294,39 @@ def initialize_models():
 
 API_KEY = os.environ.get("API_KEY", "dwp-cmg-sec-key-7d9a1f8c")
 
+import base64
+import urllib.parse
+
+def decode_payload_if_base64(data):
+    if not data or not data.get("is_base64"):
+        return data
+        
+    # Decode query
+    if "query" in data and data["query"]:
+        try:
+            decoded_bytes = base64.b64decode(data["query"])
+            try:
+                data["query"] = decoded_bytes.decode('utf-8')
+            except UnicodeDecodeError:
+                data["query"] = urllib.parse.unquote(decoded_bytes.decode('latin1'))
+        except Exception as e:
+            print(f"Error decoding query: {e}", flush=True)
+            
+    # Decode messages list
+    if "messages" in data and isinstance(data["messages"], list):
+        for msg in data["messages"]:
+            if "content" in msg and msg["content"]:
+                try:
+                    decoded_bytes = base64.b64decode(msg["content"])
+                    try:
+                        msg["content"] = decoded_bytes.decode('utf-8')
+                    except UnicodeDecodeError:
+                        msg["content"] = urllib.parse.unquote(decoded_bytes.decode('latin1'))
+                except Exception as e:
+                    print(f"Error decoding message content: {e}", flush=True)
+                    
+    return data
+
 def check_auth():
     provided_key = request.headers.get("X-API-Key") or request.args.get("api_key")
     if not provided_key and request.is_json:
@@ -318,6 +351,7 @@ def handle_retrieve():
         return auth_err
         
     data = request.get_json() or {}
+    data = decode_payload_if_base64(data)
     query = data.get("query", "").strip()
     history = data.get("history", []) or data.get("messages", [])
     model_name = data.get("model", "qwen_14b_tuned").strip()
@@ -581,6 +615,7 @@ def handle_generate():
         return auth_err
         
     data = request.get_json() or {}
+    data = decode_payload_if_base64(data)
     messages = data.get("messages", [])
     query = data.get("query", "").strip()
     model_name = data.get("model", "").strip()

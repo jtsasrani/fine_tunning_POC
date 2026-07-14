@@ -11,6 +11,14 @@ document.addEventListener("DOMContentLoaded", () => {
         "X-API-Key": getApiKey()
     });
 
+    // Helper to safely Base64 encode UTF-8 strings
+    const safeBtoA = (str) => {
+        if (!str) return "";
+        return btoa(encodeURIComponent(str).replace(/%([0-9A-F]{2})/g, (match, p1) => {
+            return String.fromCharCode('0x' + p1);
+        }));
+    };
+
     // Conversation History Storage
     let conversationMessages = [];
     // Fix 2: Tracks the retrieved RAG chunks from the last turn so the backend
@@ -235,12 +243,13 @@ document.addEventListener("DOMContentLoaded", () => {
                     method: "POST",
                     headers: authHeaders(),
                     body: JSON.stringify({ 
-                        query: text,
-                        history: conversationMessages,
+                        query: safeBtoA(text),
+                        history: conversationMessages.map(m => ({ role: m.role, content: safeBtoA(m.content) })),
                         model: modelSelect.value,
                         // Fix 2: Send last turn's retrieved chunks so the backend can
                         // anchor the condensed query in real policy document vocabulary
-                        prior_contexts: lastRetrievedContexts
+                        prior_contexts: lastRetrievedContexts,
+                        is_base64: true
                     })
                 });
                 
@@ -268,11 +277,12 @@ document.addEventListener("DOMContentLoaded", () => {
                 method: "POST",
                 headers: authHeaders(),
                 body: JSON.stringify({
-                    messages: conversationMessages,
-                    query: text,
+                    messages: conversationMessages.map(m => ({ role: m.role, content: safeBtoA(m.content) })),
+                    query: safeBtoA(text),
                     model: modelSelect.value,
                     contexts: contexts,
-                    use_rag: ragToggle.checked
+                    use_rag: ragToggle.checked,
+                    is_base64: true
                 })
             });
             
@@ -543,7 +553,10 @@ document.addEventListener("DOMContentLoaded", () => {
             const response = await fetch("/api/query/retrieve", {
                 method: "POST",
                 headers: authHeaders(),
-                body: JSON.stringify({ query: query })
+                body: JSON.stringify({ 
+                    query: safeBtoA(query),
+                    is_base64: true
+                })
             });
             
             if (response.ok) {
