@@ -301,30 +301,37 @@ def decode_payload_if_base64(data):
     if not data or not data.get("is_base64"):
         return data
         
-    # Decode query
-    if "query" in data and data["query"]:
+    # Decode query: prioritize q_base64 if present (to bypass WAF transformations on standard fields)
+    query_key = "q_base64" if "q_base64" in data else "query"
+    if query_key in data and data[query_key]:
         try:
-            decoded_bytes = base64.b64decode(data["query"])
             try:
-                data["query"] = decoded_bytes.decode('utf-8')
-            except UnicodeDecodeError:
-                data["query"] = urllib.parse.unquote(decoded_bytes.decode('latin1'))
-        except Exception as e:
-            print(f"Error decoding query: {e}", flush=True)
-            
-    # Decode messages list
-    if "messages" in data and isinstance(data["messages"], list):
-        for msg in data["messages"]:
-            if "content" in msg and msg["content"]:
+                decoded_bytes = base64.b64decode(data[query_key])
                 try:
-                    decoded_bytes = base64.b64decode(msg["content"])
+                    data["query"] = decoded_bytes.decode('utf-8')
+                except UnicodeDecodeError:
+                    data["query"] = urllib.parse.unquote(decoded_bytes.decode('latin1'))
+            except Exception:
+                if query_key == "query":
+                    # Keep original if it's already plain text
+                    pass
+        except Exception as e:
+            print(f"Error decoding query from {query_key}: {e}", flush=True)
+            
+    # Decode messages and history lists
+    for list_key in ["messages", "history"]:
+        if list_key in data and isinstance(data[list_key], list):
+            for msg in data[list_key]:
+                if "content" in msg and msg["content"]:
                     try:
-                        msg["content"] = decoded_bytes.decode('utf-8')
-                    except UnicodeDecodeError:
-                        msg["content"] = urllib.parse.unquote(decoded_bytes.decode('latin1'))
-                except Exception as e:
-                    print(f"Error decoding message content: {e}", flush=True)
-                    
+                        decoded_bytes = base64.b64decode(msg["content"])
+                        try:
+                            msg["content"] = decoded_bytes.decode('utf-8')
+                        except UnicodeDecodeError:
+                            msg["content"] = urllib.parse.unquote(decoded_bytes.decode('latin1'))
+                    except Exception as e:
+                        print(f"Error decoding {list_key} content: {e}", flush=True)
+                        
     return data
 
 def check_auth():
