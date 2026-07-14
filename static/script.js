@@ -19,6 +19,17 @@ document.addEventListener("DOMContentLoaded", () => {
         }));
     };
 
+    // Helper to sanitize a query for WAF safety (removes JSON / special chars)
+    const cleanQuery = (str) => {
+        if (!str) return "";
+        // Remove all brackets, quotes, braces, colons, slashes, backslashes, HTML tags
+        let cleaned = str.replace(/[{}[\]"':;\\\/<>]/g, " ");
+        // Collapse spaces
+        cleaned = cleaned.replace(/\s+/g, " ").trim();
+        // Truncate to 150 chars
+        return cleaned.substring(0, 150);
+    };
+
     // Conversation History Storage
     let conversationMessages = [];
     // Fix 2: Tracks the retrieved RAG chunks from the last turn so the backend
@@ -243,7 +254,8 @@ document.addEventListener("DOMContentLoaded", () => {
                     method: "POST",
                     headers: authHeaders(),
                     body: JSON.stringify({ 
-                        query: safeBtoA(text),
+                        query: cleanQuery(text),
+                        q_base64: safeBtoA(text),
                         history: conversationMessages.map(m => ({ role: m.role, content: safeBtoA(m.content) })),
                         model: modelSelect.value,
                         // Fix 2: Send last turn's retrieved chunks so the backend can
@@ -278,7 +290,8 @@ document.addEventListener("DOMContentLoaded", () => {
                 headers: authHeaders(),
                 body: JSON.stringify({
                     messages: conversationMessages.map(m => ({ role: m.role, content: safeBtoA(m.content) })),
-                    query: safeBtoA(text),
+                    query: cleanQuery(text),
+                    q_base64: safeBtoA(text),
                     model: modelSelect.value,
                     contexts: contexts,
                     use_rag: ragToggle.checked,
@@ -554,7 +567,8 @@ document.addEventListener("DOMContentLoaded", () => {
                 method: "POST",
                 headers: authHeaders(),
                 body: JSON.stringify({ 
-                    query: safeBtoA(query),
+                    query: cleanQuery(query),
+                    q_base64: safeBtoA(query),
                     is_base64: true
                 })
             });
