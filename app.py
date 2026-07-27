@@ -282,7 +282,7 @@ def initialize_models():
             model=primary_model_path,
             quantization="bitsandbytes",
             gpu_memory_utilization=0.85,
-            max_model_len=8192,
+            max_model_len=24576,
             enforce_eager=True
         )
         # Populate model_dict to keep API checks and metrics working properly
